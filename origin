@@ -1,0 +1,6 @@
+git remote -v
+origin	https://github.com/anupamkaul/weston.git (fetch)
+origin	https://github.com/anupamkaul/weston.git (push)
+upstream	https://github.com/wayland-project/weston.git (fetch)
+upstream	https://github.com/wayland-project/weston.git (push)
+

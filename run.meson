@@ -1,0 +1,6 @@
+#!/bin/sh
+
+echo $WLD
+
+meson build/ --prefix=$WLD
+ninja -C build/ install
