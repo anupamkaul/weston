@@ -92,7 +92,7 @@ desktop_surface_committed(struct weston_desktop_surface *desktop_surface,
 	if (weston_surface_is_mapped(surface))
 		return;
 
-	surface->is_mapped = true;
+	weston_surface_map(surface);
 	weston_layer_entry_insert(&dts->layer.view_list, &dts->view->layer_link);
 	weston_view_set_position(dts->view, 0 - geometry.x, 0 - geometry.y);
 	weston_view_update_transform(dts->view);
@@ -225,6 +225,7 @@ wet_shell_init(struct weston_compositor *ec,
 	weston_layer_entry_insert(&dts->background_layer.view_list,
 				  &dts->background->view->layer_link);
 	weston_view_update_transform(dts->background->view);
+	dts->background->view->is_mapped = true;
 
 	dts->desktop = weston_desktop_create(ec, &shell_desktop_api, dts);
 	if (dts->desktop == NULL)

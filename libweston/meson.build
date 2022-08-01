@@ -51,6 +51,8 @@ srcs_libweston = [
 	relative_pointer_unstable_v1_server_protocol_h,
 	weston_screenshooter_protocol_c,
 	weston_screenshooter_server_protocol_h,
+	single_pixel_buffer_v1_protocol_c,
+	single_pixel_buffer_v1_server_protocol_h,
 	text_cursor_position_protocol_c,
 	text_cursor_position_server_protocol_h,
 	text_input_unstable_v1_protocol_c,
@@ -68,6 +70,8 @@ srcs_libweston = [
 	weston_direct_display_protocol_c,
 	weston_direct_display_server_protocol_h,
 ]
+
+subdir('desktop')
 
 if get_option('renderer-gl')
 	dep_egl = dependency('egl', required: false)
@@ -126,6 +130,20 @@ pkgconfig.generate(
 	name: 'libweston API',
 	version: version_weston,
 	description: 'Header files for libweston compositors development',
+	requires_private: deps_for_libweston_users,
+	subdirs: dir_include_libweston
+)
+
+if version_weston.version_compare('>= 11.0.90')
+	error('Remove libweston-desktop.pc for Weston 12.x')
+endif
+
+pkgconfig.generate(
+	lib_weston,
+	filebase: 'libweston-desktop-@0@'.format(libweston_major),
+	name: 'libweston-desktop',
+	version: version_weston,
+	description: 'Desktop shell abstraction library for libweston compositors',
 	requires_private: deps_for_libweston_users,
 	subdirs: dir_include_libweston
 )

@@ -523,7 +523,6 @@ kiosk_shell_output_recreate_background(struct kiosk_shell_output *shoutput)
 				  &shoutput->curtain->view->layer_link);
 
 	shoutput->curtain->view->is_mapped = true;
-	shoutput->curtain->view->surface->is_mapped = true;
 	shoutput->curtain->view->surface->output = output;
 	weston_view_set_output(shoutput->curtain->view, output);
 }
@@ -799,7 +798,7 @@ desktop_surface_committed(struct weston_desktop_surface *desktop_surface,
 		struct kiosk_shell_seat *kiosk_seat;
 
 		shsurf->view->is_mapped = true;
-		surface->is_mapped = true;
+		weston_surface_map(surface);
 
 		kiosk_seat = get_kiosk_shell_seat(seat);
 		if (seat && kiosk_seat)
@@ -952,6 +951,17 @@ desktop_surface_set_xwayland_position(struct weston_desktop_surface *desktop_sur
 	shsurf->xwayland.is_set = true;
 }
 
+static void
+desktop_surface_get_position(struct weston_desktop_surface *desktop_surface,
+			     int32_t *x, int32_t *y, void *shell)
+{
+	struct kiosk_shell_surface *shsurf =
+		weston_desktop_surface_get_user_data(desktop_surface);
+
+	*x = shsurf->view->geometry.x;
+	*y = shsurf->view->geometry.y;
+}
+
 static const struct weston_desktop_api kiosk_shell_desktop_api = {
 	.struct_size = sizeof(struct weston_desktop_api),
 	.surface_added = desktop_surface_added,
@@ -966,6 +976,7 @@ static const struct weston_desktop_api kiosk_shell_desktop_api = {
 	.ping_timeout = desktop_surface_ping_timeout,
 	.pong = desktop_surface_pong,
 	.set_xwayland_position = desktop_surface_set_xwayland_position,
+	.get_position = desktop_surface_get_position,
 };
 
 /*

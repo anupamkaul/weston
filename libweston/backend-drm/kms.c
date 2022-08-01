@@ -146,6 +146,7 @@ const struct drm_property_info connector_props[] = {
 	[WDRM_CONNECTOR_HDR_OUTPUT_METADATA] = {
 		.name = "HDR_OUTPUT_METADATA",
 	},
+	[WDRM_CONNECTOR_MAX_BPC] = { .name = "max bpc", },
 };
 
 const struct drm_property_info crtc_props[] = {
@@ -906,6 +907,30 @@ drm_connector_set_hdcp_property(struct drm_connector *connector,
 }
 
 static int
+drm_connector_set_max_bpc(struct drm_connector *connector,
+			  struct drm_output *output,
+			  drmModeAtomicReq *req)
+{
+	const struct drm_property_info *info;
+	uint64_t max_bpc;
+	uint64_t a, b;
+
+	if (!drm_connector_has_prop(connector, WDRM_CONNECTOR_MAX_BPC))
+		return 0;
+
+	info = &connector->props[WDRM_CONNECTOR_MAX_BPC];
+	assert(info->flags & DRM_MODE_PROP_RANGE);
+	assert(info->num_range_values == 2);
+	a = info->range_values[0];
+	b = info->range_values[1];
+	assert(a <= b);
+
+	max_bpc = MAX(a, MIN(output->max_bpc, b));
+	return connector_add_prop(req, connector,
+				  WDRM_CONNECTOR_MAX_BPC, max_bpc);
+}
+
+static int
 drm_output_apply_state_atomic(struct drm_output_state *state,
 			      drmModeAtomicReq *req,
 			      uint32_t *flags)
@@ -965,6 +990,8 @@ drm_output_apply_state_atomic(struct drm_output_state *state,
 						  WDRM_CONNECTOR_HDR_OUTPUT_METADATA,
 						  output->hdr_output_metadata_blob_id);
 		}
+
+		ret |= drm_connector_set_max_bpc(&head->connector, output, req);
 	}
 
 	if (ret != 0) {
@@ -1076,11 +1103,13 @@ drm_pending_state_apply_atomic(struct drm_pending_state *pending_state,
 		wl_list_for_each(head_base,
 				 &b->compositor->head_list, compositor_link) {
 			struct drm_property_info *info;
+			head = to_drm_head(head_base);
+			if (!head)
+				continue;
 
 			if (weston_head_is_enabled(head_base))
 				continue;
 
-			head = to_drm_head(head_base);
 			connector_id = head->connector.connector_id;
 			if (head->connector.device != device)
 				continue;

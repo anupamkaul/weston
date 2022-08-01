@@ -119,7 +119,7 @@ uniform sampler2D tex;
 varying vec2 v_texcoord;
 uniform sampler2D tex1;
 uniform sampler2D tex2;
-uniform float alpha;
+uniform float view_alpha;
 uniform vec4 unicolor;
 uniform HIGHPRECISION sampler2D color_pre_curve_lut_2d;
 uniform HIGHPRECISION vec2 color_pre_curve_lut_scale_offset;
@@ -249,6 +249,14 @@ color_mapping(vec3 color)
 vec4
 color_pipeline(vec4 color)
 {
+	/* Ensure straight alpha */
+	if (c_input_is_premult) {
+		if (color.a == 0.0)
+			color.rgb = vec3(0, 0, 0);
+		else
+			color.rgb *= 1.0 / color.a;
+	}
+
 	color.rgb = color_pre_curve(color.rgb);
 	color.rgb = color_mapping(color.rgb);
 
@@ -263,35 +271,14 @@ main()
 	/* Electrical (non-linear) RGBA values, may be premult or not */
 	color = sample_input_texture();
 
-	if (c_need_color_pipeline) {
-		/* Ensure straight alpha */
-		if (c_input_is_premult) {
-			if (color.a == 0.0)
-				color.rgb = vec3(0, 0, 0);
-			else
-				color.rgb *= 1.0 / color.a;
-		}
+	if (c_need_color_pipeline)
+		color = color_pipeline(color); /* Produces straight alpha */
 
-		color = color_pipeline(color);
-
-		/* View alpha (opacity) */
-		color.a *= alpha;
-
-		/* pre-multiply for blending */
+	/* Ensure pre-multiplied for blending */
+	if (!c_input_is_premult || c_need_color_pipeline)
 		color.rgb *= color.a;
-	} else {
-		/* Fast path for disabled color management */
 
-		if (c_input_is_premult) {
-			/* View alpha (opacity) */
-			color *= alpha;
-		} else {
-			/* View alpha (opacity) */
-			color.a *= alpha;
-			/* pre-multiply for blending */
-			color.rgb *= color.a;
-		}
-	}
+	color *= view_alpha;
 
 	if (c_green_tint)
 		color = vec4(0.0, 0.3, 0.0, 0.2) + color * 0.8;

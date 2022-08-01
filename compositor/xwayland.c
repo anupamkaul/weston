@@ -30,12 +30,15 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/socket.h>
+#include <fcntl.h>
 
 #include <libweston/libweston.h>
 #include "compositor/weston.h"
 #include <libweston/xwayland-api.h>
 #include "shared/helpers.h"
 #include "shared/os-compatibility.h"
+#include "shared/process-util.h"
+#include "shared/string-helpers.h"
 
 #ifdef HAVE_XWAYLAND_LISTENFD
 #  define LISTEN_STR "-listenfd"
@@ -45,6 +48,7 @@
 
 struct wet_xwayland {
 	struct weston_compositor *compositor;
+	struct wl_listener compositor_destroy_listener;
 	const struct weston_xwayland_api *api;
 	struct weston_xwayland *xwayland;
 	struct wl_event_source *display_fd_source;
@@ -92,99 +96,108 @@ spawn_xserver(void *user_data, const char *display, int abstract_fd, int unix_fd
 {
 	struct wet_xwayland *wxw = user_data;
 	pid_t pid;
-	char s[12], abstract_fd_str[12], unix_fd_str[12], wm_fd_str[12];
-	char display_fd_str[12];
-	int sv[2], wm[2], fd, display_fd[2];
+	struct fdstr wayland_socket;
+	struct fdstr x11_abstract_socket;
+	struct fdstr x11_unix_socket;
+	struct fdstr x11_wm_socket;
+	struct fdstr display_pipe;
 	char *xserver = NULL;
 	struct weston_config *config = wet_get_config(wxw->compositor);
 	struct weston_config_section *section;
 	struct wl_event_loop *loop;
+	char *exec_failure_msg;
+	struct custom_env child_env;
+	char *const *envp;
+	char *const *argp;
+	bool ret;
 
-	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) < 0) {
+	if (os_socketpair_cloexec(AF_UNIX, SOCK_STREAM, 0, wayland_socket.fds) < 0) {
 		weston_log("wl connection socketpair failed\n");
 		return 1;
 	}
+	fdstr_update_str1(&wayland_socket);
 
-	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, wm) < 0) {
+	if (os_socketpair_cloexec(AF_UNIX, SOCK_STREAM, 0, x11_wm_socket.fds) < 0) {
 		weston_log("X wm connection socketpair failed\n");
 		return 1;
 	}
+	fdstr_update_str1(&x11_wm_socket);
 
-	if (pipe(display_fd) < 0) {
+	if (pipe2(display_pipe.fds, O_CLOEXEC) < 0) {
 		weston_log("pipe creation for displayfd failed\n");
 		return 1;
 	}
+	fdstr_update_str1(&display_pipe);
 
-	if (os_fd_set_cloexec(display_fd[0]) != 0) {
-		weston_log("failed setting remaining end of displayfd as cloexec\n");
-		return 1;
-	}
+	fdstr_set_fd1(&x11_abstract_socket, abstract_fd);
+	fdstr_set_fd1(&x11_unix_socket, unix_fd);
+
+	section = weston_config_get_section(config, "xwayland", NULL, NULL);
+	weston_config_section_get_string(section, "path",
+					 &xserver, XSERVER_PATH);
+	str_printf(&exec_failure_msg,
+		   "Error: executing Xwayland as '%s' failed.\n", xserver);
+	custom_env_init_from_environ(&child_env);
+	custom_env_set_env_var(&child_env, "WAYLAND_SOCKET", wayland_socket.str1);
+
+	custom_env_add_arg(&child_env, xserver);
+	custom_env_add_arg(&child_env, display);
+	custom_env_add_arg(&child_env, "-rootless");
+	custom_env_add_arg(&child_env, LISTEN_STR);
+	custom_env_add_arg(&child_env, x11_abstract_socket.str1);
+	custom_env_add_arg(&child_env, LISTEN_STR);
+	custom_env_add_arg(&child_env, x11_unix_socket.str1);
+	custom_env_add_arg(&child_env, "-displayfd");
+	custom_env_add_arg(&child_env, display_pipe.str1);
+	custom_env_add_arg(&child_env, "-wm");
+	custom_env_add_arg(&child_env, x11_wm_socket.str1);
+	custom_env_add_arg(&child_env, "-terminate");
+
+	envp = custom_env_get_envp(&child_env);
+	argp = custom_env_get_argp(&child_env);
 
 	pid = fork();
 	switch (pid) {
 	case 0:
+		setsid();
 		/* SOCK_CLOEXEC closes both ends, so we need to unset
 		 * the flag on the client fd. */
-		fd = dup(sv[1]);
-		if (fd < 0)
-			goto fail;
-		snprintf(s, sizeof s, "%d", fd);
-		setenv("WAYLAND_SOCKET", s, 1);
+		ret = fdstr_clear_cloexec_fd1(&wayland_socket);
+		ret &= fdstr_clear_cloexec_fd1(&x11_abstract_socket);
+		ret &= fdstr_clear_cloexec_fd1(&x11_unix_socket);
+		ret &= fdstr_clear_cloexec_fd1(&x11_wm_socket);
+		ret &= fdstr_clear_cloexec_fd1(&display_pipe);
+		if (!ret)
+			_exit(EXIT_FAILURE);
 
-		fd = dup(abstract_fd);
-		if (fd < 0)
-			goto fail;
-		snprintf(abstract_fd_str, sizeof abstract_fd_str, "%d", fd);
-		fd = dup(unix_fd);
-		if (fd < 0)
-			goto fail;
-		snprintf(unix_fd_str, sizeof unix_fd_str, "%d", fd);
-		fd = dup(wm[1]);
-		if (fd < 0)
-			goto fail;
-		snprintf(wm_fd_str, sizeof wm_fd_str, "%d", fd);
-		snprintf(display_fd_str, sizeof display_fd_str, "%d", display_fd[1]);
+		execve(xserver, argp, envp);
+		/* execve does not return on success, so it failed */
 
-		section = weston_config_get_section(config,
-						    "xwayland", NULL, NULL);
-		weston_config_section_get_string(section, "path",
-						 &xserver, XSERVER_PATH);
+		if (exec_failure_msg) {
+			write(STDERR_FILENO, exec_failure_msg,
+			      strlen(exec_failure_msg));
+		}
 
-		if (execl(xserver,
-			  xserver,
-			  display,
-			  "-rootless",
-			  LISTEN_STR, abstract_fd_str,
-			  LISTEN_STR, unix_fd_str,
-			  "-displayfd", display_fd_str,
-			  "-wm", wm_fd_str,
-			  "-terminate",
-			  NULL) < 0)
-			weston_log("exec of '%s %s -rootless "
-				   LISTEN_STR " %s " LISTEN_STR " %s "
-				   "-wm %s -terminate' failed: %s\n",
-				   xserver, display,
-				   abstract_fd_str, unix_fd_str, wm_fd_str,
-				   strerror(errno));
-	fail:
 		_exit(EXIT_FAILURE);
 
 	default:
-		close(sv[1]);
-		wxw->client = wl_client_create(wxw->compositor->wl_display, sv[0]);
+		close(wayland_socket.fds[1]);
+		wxw->client = wl_client_create(wxw->compositor->wl_display,
+					       wayland_socket.fds[0]);
 
-		close(wm[1]);
-		wxw->wm_fd = wm[0];
+		close(x11_wm_socket.fds[1]);
+		wxw->wm_fd = x11_wm_socket.fds[0];
 
 		/* During initialization the X server will round trip
 		 * and block on the wayland compositor, so avoid making
 		 * blocking requests (like xcb_connect_to_fd) until
 		 * it's done with that. */
-		close(display_fd[1]);
+		close(display_pipe.fds[1]);
 		loop = wl_display_get_event_loop(wxw->compositor->wl_display);
 		wxw->display_fd_source =
-			wl_event_loop_add_fd(loop, display_fd[0], WL_EVENT_READABLE,
-					handle_display_fd, wxw);
+			wl_event_loop_add_fd(loop, display_pipe.fds[0],
+					     WL_EVENT_READABLE,
+					     handle_display_fd, wxw);
 
 		wxw->process.pid = pid;
 		wet_watch_process(wxw->compositor, &wxw->process);
@@ -192,8 +205,15 @@ spawn_xserver(void *user_data, const char *display, int abstract_fd, int unix_fd
 
 	case -1:
 		weston_log("Failed to fork to spawn xserver process\n");
+		fdstr_close_all(&wayland_socket);
+		fdstr_close_all(&x11_wm_socket);
+		fdstr_close_all(&display_pipe);
 		break;
 	}
+
+	custom_env_fini(&child_env);
+	free(exec_failure_msg);
+	free(xserver);
 
 	return pid;
 }
@@ -206,6 +226,21 @@ xserver_cleanup(struct weston_process *process, int status)
 
 	wxw->api->xserver_exited(wxw->xwayland, status);
 	wxw->client = NULL;
+}
+
+static void
+wxw_compositor_destroy(struct wl_listener *listener, void *data)
+{
+	struct wet_xwayland *wxw =
+		wl_container_of(listener, wxw, compositor_destroy_listener);
+
+	/* Don't call xserver_exited because Xwayland's own destroy handler
+	 * already does this for us ... */
+	if (wxw->client)
+		kill(wxw->process.pid, SIGTERM);
+
+	wl_list_remove(&wxw->process.link);
+	free(wxw);
 }
 
 int
@@ -237,9 +272,13 @@ wet_load_xwayland(struct weston_compositor *comp)
 	wxw->compositor = comp;
 	wxw->api = api;
 	wxw->xwayland = xwayland;
+	wl_list_init(&wxw->process.link);
 	wxw->process.cleanup = xserver_cleanup;
+	wxw->compositor_destroy_listener.notify = wxw_compositor_destroy;
 	if (api->listen(xwayland, wxw, spawn_xserver) < 0)
 		return -1;
+
+	wl_signal_add(&comp->destroy_signal, &wxw->compositor_destroy_listener);
 
 	return 0;
 }

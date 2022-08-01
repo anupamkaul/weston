@@ -51,6 +51,7 @@
 #include <libweston/libweston.h>
 #include "shared/os-compatibility.h"
 #include "shared/helpers.h"
+#include "shared/process-util.h"
 #include "shared/string-helpers.h"
 #include "git-version.h"
 #include <libweston/version.h>
@@ -357,6 +358,7 @@ sigchld_handler(int signal_number, void *data)
 		}
 
 		wl_list_remove(&p->link);
+		wl_list_init(&p->link);
 		p->cleanup(p, status);
 	}
 
@@ -366,69 +368,48 @@ sigchld_handler(int signal_number, void *data)
 	return 1;
 }
 
-static void
-child_client_exec(int sockfd, const char *path)
-{
-	int clientfd;
-	char s[32];
-	sigset_t allsigs;
-
-	/* do not give our signal mask to the new process */
-	sigfillset(&allsigs);
-	sigprocmask(SIG_UNBLOCK, &allsigs, NULL);
-
-	/* Launch clients as the user. Do not launch clients with wrong euid. */
-	if (seteuid(getuid()) == -1) {
-		weston_log("compositor: failed seteuid\n");
-		return;
-	}
-
-	/* SOCK_CLOEXEC closes both ends, so we dup the fd to get a
-	 * non-CLOEXEC fd to pass through exec. */
-	clientfd = dup(sockfd);
-	if (clientfd == -1) {
-		weston_log("compositor: dup failed: %s\n", strerror(errno));
-		return;
-	}
-
-	snprintf(s, sizeof s, "%d", clientfd);
-	setenv("WAYLAND_SOCKET", s, 1);
-
-	if (execl(path, path, NULL) < 0)
-		weston_log("compositor: executing '%s' failed: %s\n",
-			   path, strerror(errno));
-}
-
 WL_EXPORT struct wl_client *
 weston_client_launch(struct weston_compositor *compositor,
 		     struct weston_process *proc,
 		     const char *path,
 		     weston_process_cleanup_func_t cleanup)
 {
-	int sv[2];
+	struct wl_client *client = NULL;
+	struct custom_env child_env;
+	struct fdstr wayland_socket;
+	const char *fail_cloexec = "Couldn't unset CLOEXEC on client socket";
+	const char *fail_seteuid = "Couldn't call seteuid";
+	char *fail_exec;
+	char * const *argp;
+	char * const *envp;
+	sigset_t allsigs;
 	pid_t pid;
-	struct wl_client *client;
+	bool ret;
 
 	weston_log("launching '%s'\n", path);
+	str_printf(&fail_exec, "Error: Couldn't launch client '%s'\n", path);
 
-	if (os_socketpair_cloexec(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
+	custom_env_init_from_environ(&child_env);
+	custom_env_add_arg(&child_env, path);
+
+	if (os_socketpair_cloexec(AF_UNIX, SOCK_STREAM, 0,
+				  wayland_socket.fds) < 0) {
 		weston_log("weston_client_launch: "
 			   "socketpair failed while launching '%s': %s\n",
 			   path, strerror(errno));
+		custom_env_fini(&child_env);
 		return NULL;
 	}
+	fdstr_update_str1(&wayland_socket);
+	custom_env_set_env_var(&child_env, "WAYLAND_SOCKET",
+			       wayland_socket.str1);
+
+	argp = custom_env_get_argp(&child_env);
+	envp = custom_env_get_envp(&child_env);
 
 	pid = fork();
-	if (pid == -1) {
-		close(sv[0]);
-		close(sv[1]);
-		weston_log("weston_client_launch: "
-			   "fork failed while launching '%s': %s\n", path,
-			   strerror(errno));
-		return NULL;
-	}
-
-	if (pid == 0) {
+	switch (pid) {
+	case 0:
 		/* Put the client in a new session so it won't catch signals
 		 * intended for the parent. Sharing a session can be
 		 * confusing when launching weston under gdb, as the ctrl-c
@@ -436,24 +417,60 @@ weston_client_launch(struct weston_compositor *compositor,
 		 * will cleanly shut down when the child exits.
 		 */
 		setsid();
-		child_client_exec(sv[1], path);
-		_exit(-1);
-	}
 
-	close(sv[1]);
+		/* do not give our signal mask to the new process */
+		sigfillset(&allsigs);
+		sigprocmask(SIG_UNBLOCK, &allsigs, NULL);
 
-	client = wl_client_create(compositor->wl_display, sv[0]);
-	if (!client) {
-		close(sv[0]);
+		/* Launch clients as the user. Do not launch clients with wrong euid. */
+		if (seteuid(getuid()) == -1) {
+			write(STDERR_FILENO, fail_seteuid,
+			      strlen(fail_seteuid));
+			_exit(EXIT_FAILURE);
+		}
+
+		ret = fdstr_clear_cloexec_fd1(&wayland_socket);
+		if (!ret) {
+			write(STDERR_FILENO, fail_cloexec,
+			      strlen(fail_cloexec));
+			_exit(EXIT_FAILURE);
+		}
+
+		execve(argp[0], argp, envp);
+
+		if (fail_exec)
+			write(STDERR_FILENO, fail_exec, strlen(fail_exec));
+		_exit(EXIT_FAILURE);
+
+	default:
+		close(wayland_socket.fds[1]);
+		client = wl_client_create(compositor->wl_display,
+					  wayland_socket.fds[0]);
+		if (!client) {
+			custom_env_fini(&child_env);
+			close(wayland_socket.fds[0]);
+			free(fail_exec);
+			weston_log("weston_client_launch: "
+				"wl_client_create failed while launching '%s'.\n",
+				path);
+			return NULL;
+		}
+
+		proc->pid = pid;
+		proc->cleanup = cleanup;
+		wet_watch_process(compositor, proc);
+		break;
+
+	case -1:
+		fdstr_close_all(&wayland_socket);
 		weston_log("weston_client_launch: "
-			"wl_client_create failed while launching '%s'.\n",
-			path);
-		return NULL;
+			   "fork failed while launching '%s': %s\n", path,
+			   strerror(errno));
+		break;
 	}
 
-	proc->pid = pid;
-	proc->cleanup = cleanup;
-	wet_watch_process(compositor, proc);
+	custom_env_fini(&child_env);
+	free(fail_exec);
 
 	return client;
 }
@@ -972,7 +989,7 @@ wet_get_bindir_path(const char *name)
 
 static int
 load_modules(struct weston_compositor *ec, const char *modules,
-	     int *argc, char *argv[], bool *xwayland)
+	     int *argc, char *argv[])
 {
 	const char *p, *end;
 	char buffer[256];
@@ -986,11 +1003,11 @@ load_modules(struct weston_compositor *ec, const char *modules,
 		snprintf(buffer, sizeof buffer, "%.*s", (int) (end - p), p);
 
 		if (strstr(buffer, "xwayland.so")) {
-			weston_log("Old Xwayland module loading detected: "
+			weston_log("fatal: Old Xwayland module loading detected: "
 				   "Please use --xwayland command line option "
 				   "or set xwayland=true in the [core] section "
 				   "in weston.ini\n");
-			*xwayland = true;
+			return -1;
 		} else {
 			if (wet_load_module(ec, buffer, argc, argv) < 0)
 				return -1;
@@ -2000,6 +2017,7 @@ drm_backend_output_configure(struct weston_output *output,
 	enum weston_drm_backend_output_mode mode =
 		WESTON_DRM_BACKEND_OUTPUT_PREFERRED;
 	uint32_t transform = WL_OUTPUT_TRANSFORM_NORMAL;
+	uint32_t max_bpc;
 	char *s;
 	char *modeline = NULL;
 	char *gbm_format = NULL;
@@ -2010,6 +2028,9 @@ drm_backend_output_configure(struct weston_output *output,
 		weston_log("Cannot use weston_drm_output_api.\n");
 		return -1;
 	}
+
+	weston_config_section_get_uint(section, "max-bpc", &max_bpc, 16);
+	api->set_max_bpc(output, max_bpc);
 
 	weston_config_section_get_string(section, "mode", &s, "preferred");
 
@@ -3708,13 +3729,10 @@ wet_main(int argc, char *argv[], const struct weston_testsuite_data *test_data)
 	if (wet_load_shell(wet.compositor, shell, &argc, argv) < 0)
 		goto out;
 
-	weston_config_section_get_string(section, "modules", &modules, "");
-	if (load_modules(wet.compositor, modules, &argc, argv, &xwayland) < 0)
-		goto out;
-
-	if (load_modules(wet.compositor, option_modules, &argc, argv, &xwayland) < 0)
-		goto out;
-
+	/* Load xwayland before other modules - this way if we're using
+	 * the systemd-notify module it will notify after we're ready
+	 * to receive xwayland connections.
+	 */
 	if (!xwayland) {
 		weston_config_section_get_bool(section, "xwayland", &xwayland,
 					       false);
@@ -3723,6 +3741,13 @@ wet_main(int argc, char *argv[], const struct weston_testsuite_data *test_data)
 		if (wet_load_xwayland(wet.compositor) < 0)
 			goto out;
 	}
+
+	weston_config_section_get_string(section, "modules", &modules, "");
+	if (load_modules(wet.compositor, modules, &argc, argv) < 0)
+		goto out;
+
+	if (load_modules(wet.compositor, option_modules, &argc, argv) < 0)
+		goto out;
 
 	section = weston_config_get_section(config, "keyboard", NULL, NULL);
 	weston_config_section_get_bool(section, "numlock-on", &numlock_on, false);
@@ -3759,8 +3784,6 @@ wet_main(int argc, char *argv[], const struct weston_testsuite_data *test_data)
 	ret = wet.compositor->exit_code;
 
 out:
-	wet_compositor_destroy_layout(&wet);
-
 	/* free(NULL) is valid, and it won't be NULL if it's used */
 	free(wet.parsed_options);
 
@@ -3768,6 +3791,7 @@ out:
 		wl_protocol_logger_destroy(protologger);
 
 	weston_compositor_destroy(wet.compositor);
+	wet_compositor_destroy_layout(&wet);
 	weston_log_scope_destroy(protocol_scope);
 	protocol_scope = NULL;
 

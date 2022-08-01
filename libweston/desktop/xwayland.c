@@ -64,6 +64,7 @@ struct weston_desktop_xwayland_surface {
 	bool committed;
 	bool added;
 	enum weston_desktop_xwayland_surface_state state;
+	enum weston_desktop_xwayland_surface_state prev_state;
 };
 
 static void
@@ -122,7 +123,7 @@ weston_desktop_xwayland_surface_change_state(struct weston_desktop_xwayland_surf
 			weston_layer_entry_insert(&surface->xwayland->layer.view_list,
 						  &surface->view->layer_link);
 			surface->view->is_mapped = true;
-			wsurface->is_mapped = true;
+			weston_surface_map(wsurface);
 		}
 
 		surface->state = state;
@@ -150,8 +151,16 @@ weston_desktop_xwayland_surface_committed(struct weston_desktop_surface *dsurfac
 
 	if (surface->has_next_geometry) {
 		oldgeom = weston_desktop_surface_get_geometry(surface->surface);
-		sx -= surface->next_geometry.x - oldgeom.x;
-		sy -= surface->next_geometry.y - oldgeom.y;
+		/* If we're transitioning away from fullscreen or maximized
+		 * we've moved to old saved co-ordinates that were saved
+		 * with window geometry in place, so avoid adajusting by
+		 * the geometry in those cases.
+		 */
+		if (surface->state == surface->prev_state) {
+			sx -= surface->next_geometry.x - oldgeom.x;
+			sy -= surface->next_geometry.y - oldgeom.y;
+		}
+		surface->prev_state = surface->state;
 
 		surface->has_next_geometry = false;
 		weston_desktop_surface_set_geometry(surface->surface,
@@ -392,9 +401,28 @@ set_maximized(struct weston_desktop_xwayland_surface *surface)
 }
 
 static void
+set_minimized(struct weston_desktop_xwayland_surface *surface)
+{
+	weston_desktop_api_minimized_requested(surface->desktop,
+					       surface->surface);
+}
+
+static void
 set_pid(struct weston_desktop_xwayland_surface *surface, pid_t pid)
 {
 	weston_desktop_surface_set_pid(surface->surface, pid);
+}
+
+static void
+get_position(struct weston_desktop_xwayland_surface *surface,
+	     int32_t *x, int32_t *y)
+{
+	if (!surface->surface) {
+		*x = 0;
+		*y = 0;
+		return;
+	}
+	weston_desktop_api_get_position(surface->desktop, surface->surface, x, y);
 }
 
 static const struct weston_desktop_xwayland_interface weston_desktop_xwayland_interface = {
@@ -410,7 +438,9 @@ static const struct weston_desktop_xwayland_interface weston_desktop_xwayland_in
 	.set_title = set_title,
 	.set_window_geometry = set_window_geometry,
 	.set_maximized = set_maximized,
+	.set_minimized = set_minimized,
 	.set_pid = set_pid,
+	.get_position = get_position,
 };
 
 void
@@ -427,10 +457,21 @@ weston_desktop_xwayland_init(struct weston_desktop *desktop)
 	xwayland->client = weston_desktop_client_create(desktop, NULL, NULL, NULL, NULL, 0, 0);
 
 	weston_layer_init(&xwayland->layer, compositor);
-	/* We put this layer on top of regular shell surfaces, but hopefully
-	 * below any UI the shell would add */
+	/* This is the layer we use for override redirect "windows", which
+	 * ends up used for tooltips and drop down menus, among other things.
+	 * Previously this was WESTON_LAYER_POSITION_NORMAL + 1, but this is
+	 * below the fullscreen layer, so fullscreen apps would be above their
+	 * menus and tooltips.
+	 *
+	 * Moving this to just below the TOP_UI layer ensures visibility at all
+	 * times, with the minor drawback that they could be rendered above
+	 * DESKTOP_UI.
+	 *
+	 * For tooltips with no transient window hints, this is probably the best
+	 * we can do.
+	 */
 	weston_layer_set_position(&xwayland->layer,
-				  WESTON_LAYER_POSITION_NORMAL + 1);
+				  WESTON_LAYER_POSITION_TOP_UI - 1);
 
 	compositor->xwayland = xwayland;
 	compositor->xwayland_interface = &weston_desktop_xwayland_interface;

@@ -45,7 +45,7 @@
  * implements the older unstable xdg shell v6 protocol.
  ************************************************************************************/
 
-#define WD_XDG_SHELL_PROTOCOL_VERSION 3
+#define WD_XDG_SHELL_PROTOCOL_VERSION 5
 
 static const char *weston_desktop_xdg_toplevel_role = "xdg_toplevel";
 static const char *weston_desktop_xdg_popup_role = "xdg_popup";
@@ -693,11 +693,11 @@ weston_desktop_xdg_toplevel_committed(struct weston_desktop_xdg_toplevel *toplev
 	struct weston_surface *wsurface =
 		weston_desktop_surface_get_surface(toplevel->base.desktop_surface);
 
-	if (!wsurface->buffer_ref.buffer && !toplevel->added) {
+	if (!weston_surface_has_content(wsurface) && !toplevel->added) {
 		weston_desktop_xdg_toplevel_ensure_added(toplevel);
 		return;
 	}
-	if (!wsurface->buffer_ref.buffer)
+	if (!weston_surface_has_content(wsurface))
 		return;
 
 	struct weston_geometry geometry =
@@ -962,6 +962,14 @@ weston_desktop_xdg_popup_committed(struct weston_desktop_xdg_popup *popup)
 	popup->committed = true;
 	weston_desktop_xdg_popup_update_position(popup->base.desktop_surface,
 						 popup);
+
+	if (!weston_surface_is_mapped(wsurface) &&
+	    weston_surface_has_content(wsurface)) {
+		weston_surface_map(wsurface);
+	} else if (weston_surface_is_mapped(wsurface) &&
+		   !weston_surface_has_content(wsurface)) {
+		weston_surface_unmap(wsurface);
+	}
 }
 
 static void
@@ -1154,6 +1162,7 @@ weston_desktop_xdg_surface_protocol_get_toplevel(struct wl_client *wl_client,
 		weston_desktop_surface_get_surface(dsurface);
 	struct weston_desktop_xdg_toplevel *toplevel =
 		weston_desktop_surface_get_implementation_data(dsurface);
+	struct weston_desktop *desktop = toplevel->base.desktop;
 
 	if (weston_surface_set_role(wsurface, weston_desktop_xdg_toplevel_role,
 				    resource, XDG_WM_BASE_ERROR_ROLE) < 0)
@@ -1168,6 +1177,35 @@ weston_desktop_xdg_surface_protocol_get_toplevel(struct wl_client *wl_client,
 		return;
 
 	toplevel->base.role = WESTON_DESKTOP_XDG_SURFACE_ROLE_TOPLEVEL;
+
+	if (wl_resource_get_version(toplevel->resource) >=
+	    XDG_TOPLEVEL_WM_CAPABILITIES_SINCE_VERSION) {
+		struct wl_array caps;
+		uint32_t *cap;
+
+		wl_array_init(&caps);
+
+		if (weston_desktop_window_menu_supported(desktop)) {
+			cap = wl_array_add(&caps, sizeof(*cap));
+			*cap = XDG_TOPLEVEL_WM_CAPABILITIES_WINDOW_MENU;
+		}
+		if (weston_desktop_maximize_supported(desktop)) {
+			cap = wl_array_add(&caps, sizeof(*cap));
+			*cap = XDG_TOPLEVEL_WM_CAPABILITIES_MAXIMIZE;
+		}
+		if (weston_desktop_fullscreen_supported(desktop)) {
+			cap = wl_array_add(&caps, sizeof(*cap));
+			*cap = XDG_TOPLEVEL_WM_CAPABILITIES_FULLSCREEN;
+		}
+		if (weston_desktop_minimize_supported(desktop)) {
+			cap = wl_array_add(&caps, sizeof(*cap));
+			*cap = XDG_TOPLEVEL_WM_CAPABILITIES_MINIMIZE;
+		}
+
+		xdg_toplevel_send_wm_capabilities(toplevel->resource, &caps);
+
+		wl_array_release(&caps);
+	}
 }
 
 static void
@@ -1351,7 +1389,7 @@ weston_desktop_xdg_surface_committed(struct weston_desktop_surface *dsurface,
 	struct weston_surface *wsurface =
 		weston_desktop_surface_get_surface (dsurface);
 
-	if (wsurface->buffer_ref.buffer && !surface->configured) {
+	if (weston_surface_has_content(wsurface) && !surface->configured) {
 		wl_resource_post_error(surface->resource,
 				       XDG_SURFACE_ERROR_UNCONFIGURED_BUFFER,
 				       "xdg_surface has never been configured");
@@ -1518,7 +1556,7 @@ weston_desktop_xdg_shell_protocol_get_xdg_surface(struct wl_client *wl_client,
 		return;
 	}
 
-	if (wsurface->buffer_ref.buffer != NULL) {
+	if (weston_surface_has_content(wsurface)) {
 		wl_resource_post_error(resource,
 				       XDG_SURFACE_ERROR_UNCONFIGURED_BUFFER,
 				       "xdg_surface must not have a buffer at creation");

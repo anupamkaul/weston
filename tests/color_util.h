@@ -28,6 +28,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 enum color_chan_index {
 	COLOR_CHAN_R = 0,
@@ -108,6 +109,12 @@ process_pixel_using_pipeline(enum transfer_fn pre_curve,
 			     struct color_float *out);
 
 struct color_float
+color_float_unpremult(struct color_float in);
+
+struct color_float
+color_float_apply_curve(enum transfer_fn fn, struct color_float c);
+
+struct color_float
 color_float_apply_matrix(const struct lcmsMAT3 *mat, struct color_float c);
 
 enum transfer_fn
@@ -119,6 +126,10 @@ transfer_fn_name(enum transfer_fn fn);
 void
 lcmsMAT3_invert(struct lcmsMAT3 *result, const struct lcmsMAT3 *mat);
 
+/** Scalar statistics
+ *
+ * See scalar_stat_update().
+ */
 struct scalar_stat {
 	double min;
 	struct color_float min_pos;
@@ -128,25 +139,57 @@ struct scalar_stat {
 
 	double sum;
 	unsigned count;
+
+	/** Debug dump into file
+	 *
+	 * Initialize this to a writable file to get a record of all values
+	 * ever fed through this statistics accumulator. The file shall be
+	 * text with one value and its position per line:
+	 *   val pos.r pos.g pos.b pos.a
+	 *
+	 * Set to NULL to not record.
+	 */
+	FILE *dump;
 };
 
+/** RGB difference statistics
+ *
+ * See rgb_diff_stat_update().
+ */
 struct rgb_diff_stat {
 	struct scalar_stat rgb[COLOR_CHAN_NUM];
 	struct scalar_stat two_norm;
+
+	/** Debug dump into file
+	 *
+	 * Initialize this to a writable file to get a record of all values
+	 * ever fed through this statistics accumulator. The file shall be
+	 * text with the two-norm error, the rgb difference, and their position
+	 * per line:
+	 *   norm diff.r diff.g diff.b pos.r pos.g pos.b pos.a
+	 *
+	 * Set to NULL to not record.
+	 */
+	FILE *dump;
 };
 
 void
-scalar_stat_update(struct scalar_stat *stat, double val, struct color_float *pos);
+scalar_stat_update(struct scalar_stat *stat,
+		   double val,
+		   const struct color_float *pos);
 
 float
 scalar_stat_avg(const struct scalar_stat *stat);
-
-void
-scalar_stat_print_rgb8bit(const struct scalar_stat *stat);
 
 void
 scalar_stat_print_float(const struct scalar_stat *stat);
 
 void
 rgb_diff_stat_update(struct rgb_diff_stat *stat,
-		     struct color_float *ref, struct color_float *val);
+		     const struct color_float *ref,
+		     const struct color_float *val,
+		     const struct color_float *pos);
+
+void
+rgb_diff_stat_print(const struct rgb_diff_stat *stat,
+		    const char *title, unsigned scaling_bits);

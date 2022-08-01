@@ -1263,6 +1263,7 @@ struct weston_compositor {
 	struct wl_list plugin_api_list; /* struct weston_plugin_api::link */
 
 	uint32_t output_id_pool;
+	bool output_flow_dirty;
 
 	struct xkb_rule_names xkb_names;
 	struct xkb_context *xkb_context;
@@ -1311,6 +1312,14 @@ struct weston_compositor {
 	struct weston_log_scope *libseat_debug;
 
 	struct content_protection *content_protection;
+
+	/* One-time warning about a view appearing in the layer list when it
+	 * or its surface are not mapped. */
+	bool warned_about_unmapped_surface_or_view;
+};
+
+struct weston_solid_buffer_values {
+	float r, g, b, a;
 };
 
 struct weston_buffer {
@@ -1329,9 +1338,7 @@ struct weston_buffer {
 		struct wl_shm_buffer *shm_buffer;
 		void *dmabuf;
 		void *legacy_buffer;
-		struct {
-			float r, g, b, a;
-		} solid;
+		struct weston_solid_buffer_values solid;
 	};
 
 	int32_t width, height;
@@ -1531,6 +1538,7 @@ struct weston_surface_state {
 	int newly_attached;
 	struct weston_buffer *buffer;
 	struct wl_listener buffer_destroy_listener;
+
 	int32_t sx;
 	int32_t sy;
 
@@ -1928,6 +1936,9 @@ weston_surface_attach_solid(struct weston_surface *surface,
 void
 weston_buffer_destroy_solid(struct weston_buffer_reference *buffer_ref);
 
+bool
+weston_surface_has_content(struct weston_surface *surface);
+
 void
 weston_view_destroy(struct weston_view *view);
 
@@ -1967,6 +1978,9 @@ weston_view_damage_below(struct weston_view *view);
 
 void
 weston_view_unmap(struct weston_view *view);
+
+void
+weston_surface_map(struct weston_surface *surface);
 
 void
 weston_surface_unmap(struct weston_surface *surface);

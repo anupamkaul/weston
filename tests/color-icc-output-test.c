@@ -1,5 +1,6 @@
 /*
  * Copyright 2021 Advanced Micro Devices, Inc.
+ * Copyright 2020, 2022 Collabora, Ltd.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -27,6 +28,7 @@
 
 #include <math.h>
 #include <string.h>
+#include <stdio.h>
 #include <linux/limits.h>
 
 #include <lcms2.h>
@@ -34,6 +36,7 @@
 #include "weston-test-client-helper.h"
 #include "weston-test-fixture-compositor.h"
 #include "color_util.h"
+#include "image-iter.h"
 #include "lcms_util.h"
 
 struct lcms_pipeline {
@@ -135,8 +138,10 @@ struct setup_args {
 	struct fixture_metadata meta;
 	int ref_image_index;
 	const struct lcms_pipeline *pipeline;
+
 	/**
-	 * 2/255 or 3/255 maximum possible error, where 255 is 8 bit max value
+	 * Two-norm color error tolerance in units of 1.0/255, computed in
+	 * output electrical space.
 	 *
 	 * Tolerance depends more on the 1D LUT used for the
 	 * inv EOTF than the tested 3D LUT size:
@@ -146,7 +151,8 @@ struct setup_args {
 	 * in GL-renderer, then we should fix the tolerance
 	 * as the error should reduce a lot.
 	 */
-	int tolerance;
+	float tolerance;
+
 	/**
 	 * 3DLUT dimension size
 	 */
@@ -158,33 +164,13 @@ struct setup_args {
 };
 
 static const struct setup_args my_setup_args[] = {
-	/* name,          ref img, pipeline,   tolerance, dim, profile type, clut tolerance */
-	{ { "sRGB->sRGB" },     0, &pipeline_sRGB,     0,  0, PTYPE_MATRIX_SHAPER },
-	{ { "sRGB->adobeRGB" }, 1, &pipeline_adobeRGB, 1,  0, PTYPE_MATRIX_SHAPER },
-	{ { "sRGB->BT2020" },   2, &pipeline_BT2020,   5,  0, PTYPE_MATRIX_SHAPER },
-	{ { "sRGB->sRGB" },     0, &pipeline_sRGB,     0, 17, PTYPE_CLUT,         0.0005 },
-	{ { "sRGB->adobeRGB" }, 1, &pipeline_adobeRGB, 1, 17, PTYPE_CLUT,         0.0065 },
+	/* name,          ref img, pipeline,     tolerance, dim, profile type, clut tolerance */
+	{ { "sRGB->sRGB" },     0, &pipeline_sRGB,     0.0,  0, PTYPE_MATRIX_SHAPER },
+	{ { "sRGB->adobeRGB" }, 1, &pipeline_adobeRGB, 1.4,  0, PTYPE_MATRIX_SHAPER },
+	{ { "sRGB->BT2020" },   2, &pipeline_BT2020,   4.5,  0, PTYPE_MATRIX_SHAPER },
+	{ { "sRGB->sRGB" },     0, &pipeline_sRGB,     0.0, 17, PTYPE_CLUT,         0.0005 },
+	{ { "sRGB->adobeRGB" }, 1, &pipeline_adobeRGB, 1.8, 17, PTYPE_CLUT,         0.0065 },
 };
-
-struct image_header {
-	int width;
-	int height;
-	int stride;
-	int depth;
-	pixman_format_code_t pix_format;
-	uint32_t *data;
-};
-
-static void
-get_image_prop(struct buffer *buf, struct image_header *header)
-{
-	header->width  = pixman_image_get_width(buf->image);
-	header->height = pixman_image_get_height(buf->image);
-	header->stride = pixman_image_get_stride(buf->image);
-	header->depth = pixman_image_get_depth(buf->image);
-	header->pix_format = pixman_image_get_format (buf->image);
-	header->data = pixman_image_get_data(buf->image);
-}
 
 static void
 test_roundtrip(uint8_t r, uint8_t g, uint8_t b, cmsPipeline *pip,
@@ -194,7 +180,7 @@ test_roundtrip(uint8_t r, uint8_t g, uint8_t b, cmsPipeline *pip,
 	struct color_float out = {};
 
 	cmsPipelineEvalFloat(in.rgb, out.rgb, pip);
-	rgb_diff_stat_update(stat, &in, &out);
+	rgb_diff_stat_update(stat, &in, &out, &in);
 }
 
 /*
@@ -208,8 +194,6 @@ test_roundtrip(uint8_t r, uint8_t g, uint8_t b, cmsPipeline *pip,
 static void
 roundtrip_verification(cmsPipeline *DToB, cmsPipeline *BToD, float tolerance)
 {
-	const char *const chan_name[COLOR_CHAN_NUM] = { "r", "g", "b" };
-	unsigned i;
 	unsigned r, g, b;
 	struct rgb_diff_stat stat = {};
 	cmsPipeline *pip;
@@ -230,15 +214,7 @@ roundtrip_verification(cmsPipeline *DToB, cmsPipeline *BToD, float tolerance)
 
 	cmsPipelineFree(pip);
 
-	testlog("DToB->BToD roundtrip error statistics (%u samples):\n",
-		stat.two_norm.count);
-	for (i = 0; i < COLOR_CHAN_NUM; i++) {
-		testlog("  ch %s error:\n", chan_name[i]);
-		scalar_stat_print_rgb8bit(&stat.rgb[i]);
-	}
-	testlog("  Two-norm error:\n");
-	scalar_stat_print_rgb8bit(&stat.two_norm);
-
+	rgb_diff_stat_print(&stat, "DToB->BToD roundtrip", 8);
 	assert(stat.two_norm.max < tolerance);
 }
 
@@ -486,7 +462,7 @@ fixture_setup(struct weston_test_harness *harness, const struct setup_args *arg)
 DECLARE_FIXTURE_SETUP_WITH_ARG(fixture_setup, my_setup_args, meta);
 
 static void
-gen_ramp_rgb(const struct image_header *header, int bitwidth, int width_bar)
+gen_ramp_rgb(pixman_image_t *image, int bitwidth, int width_bar)
 {
 	static const int hue[][COLOR_CHAN_NUM] = {
 		{ 1, 1, 1 },	/* White	*/
@@ -499,6 +475,7 @@ gen_ramp_rgb(const struct image_header *header, int bitwidth, int width_bar)
 	};
 	const int num_hues = ARRAY_LENGTH(hue);
 
+	struct image_header ih = image_header_from(image);
 	float val_max;
 	int x, y;
 	int hue_index;
@@ -511,14 +488,15 @@ gen_ramp_rgb(const struct image_header *header, int bitwidth, int width_bar)
 
 	val_max = (1 << bitwidth) - 1;
 
-	for (y = 0; y < header->height; y++) {
-		hue_index = (y * num_hues) / (header->height - 1);
+	for (y = 0; y < ih.height; y++) {
+		hue_index = (y * num_hues) / (ih.height - 1);
 		hue_index = MIN(hue_index, num_hues - 1);
 
-		for (x = 0; x < header->width; x++) {
+		pixel = image_header_get_row_u32(&ih, y);
+		for (x = 0; x < ih.width; x++, pixel++) {
 			struct color_float rgb = { .rgb = { 0, 0, 0 } };
 
-			value = (float)x / (float)(header->width - 1);
+			value = (float)x / (float)(ih.width - 1);
 
 			if (width_bar > 1)
 				value = floor(value * n_steps) / n_steps;
@@ -534,127 +512,70 @@ gen_ramp_rgb(const struct image_header *header, int bitwidth, int width_bar)
 			g = round(rgb.g * val_max);
 			b = round(rgb.b * val_max);
 
-			pixel = header->data + (y * header->stride / 4) + x;
 			*pixel = (255U << 24) | (r << 16) | (g << 8) | b;
 		}
 	}
 }
 
 static bool
-compare_float(float ref, float dst, int x, const char *chan,
-	      float *max_diff, float max_allow_diff)
-{
-#if 0
-	/*
-	 * This file can be loaded in Octave for visualization.
-	 *
-	 * S = load('compare_float_dump.txt');
-	 *
-	 * rvec = S(S(:,1)==114, 2:3);
-	 * gvec = S(S(:,1)==103, 2:3);
-	 * bvec = S(S(:,1)==98, 2:3);
-	 *
-	 * figure
-	 * subplot(3, 1, 1);
-	 * plot(rvec(:,1), rvec(:,2) .* 255, 'r');
-	 * subplot(3, 1, 2);
-	 * plot(gvec(:,1), gvec(:,2) .* 255, 'g');
-	 * subplot(3, 1, 3);
-	 * plot(bvec(:,1), bvec(:,2) .* 255, 'b');
-	 */
-	static FILE *fp = NULL;
-
-	if (!fp)
-		fp = fopen("compare_float_dump.txt", "w");
-	fprintf(fp, "%d %d %f\n", chan[0], x, dst - ref);
-	fflush(fp);
-#endif
-
-	float diff  = fabsf(ref - dst);
-
-	if (diff > *max_diff)
-		*max_diff = diff;
-
-	if (diff <= max_allow_diff)
-		return true;
-
-	testlog("x=%d %s: ref %f != dst %f, delta %f\n",
-			x, chan, ref, dst, dst - ref);
-
-	return false;
-}
-
-static bool
-process_pipeline_comparison(const struct image_header *src,
-			    const struct image_header *shot,
+process_pipeline_comparison(const struct buffer *src_buf,
+			    const struct buffer *shot_buf,
 			    const struct setup_args * arg)
 {
-	const char *const chan_name[COLOR_CHAN_NUM] = { "r", "g", "b" };
-	const float max_pixel_value = 255.0;
-	struct color_float max_diff_pipeline = { .rgb = { 0.0f, 0.0f, 0.0f } };
-	float max_allow_diff = arg->tolerance / max_pixel_value;
-	float max_err = 0.0f;
-	bool ok = true;
-	uint32_t *row_ptr, *row_ptr_shot;
+	FILE *dump = NULL;
+#if 0
+	/*
+	 * This file can be loaded in Octave for visualization. Find the script
+	 * in tests/visualization/weston_plot_rgb_diff_stat.m and call it with
+	 *
+	 * weston_plot_rgb_diff_stat('opaque_pixel_conversion-f05-dump.txt')
+	 */
+	dump = fopen_dump_file("dump");
+#endif
+
+	struct image_header ih_src = image_header_from(src_buf->image);
+	struct image_header ih_shot = image_header_from(shot_buf->image);
 	int y, x;
-	int chan;
 	struct color_float pix_src;
 	struct color_float pix_src_pipeline;
 	struct color_float pix_shot;
+	struct rgb_diff_stat diffstat = { .dump = dump };
+	bool ok;
 
-	for (y = 0; y < src->height; y++) {
-		row_ptr = (uint32_t*)((uint8_t*)src->data + (src->stride * y));
-		row_ptr_shot  = (uint32_t*)((uint8_t*)shot->data + (shot->stride * y));
+	/* no point to compare different images */
+	assert(ih_src.width == ih_shot.width);
+	assert(ih_src.height == ih_shot.height);
 
-		for (x = 0; x < src->width; x++) {
+	for (y = 0; y < ih_src.height; y++) {
+		uint32_t *row_ptr = image_header_get_row_u32(&ih_src, y);
+		uint32_t *row_ptr_shot = image_header_get_row_u32(&ih_shot, y);
+
+		for (x = 0; x < ih_src.width; x++) {
 			pix_src = a8r8g8b8_to_float(row_ptr[x]);
 			pix_shot = a8r8g8b8_to_float(row_ptr_shot[x]);
-			/* do pipeline processing */
+
 			process_pixel_using_pipeline(arg->pipeline->pre_fn,
 						     &arg->pipeline->mat,
 						     arg->pipeline->post_fn,
 						     &pix_src, &pix_src_pipeline);
 
-			/* check if pipeline matches to shader variant */
-			for (chan = 0; chan < COLOR_CHAN_NUM; chan++) {
-				ok &= compare_float(pix_src_pipeline.rgb[chan],
-						    pix_shot.rgb[chan],
-						    x, chan_name[chan],
-						    &max_diff_pipeline.rgb[chan],
-						    max_allow_diff);
-			}
+			rgb_diff_stat_update(&diffstat,
+					     &pix_src_pipeline, &pix_shot,
+					     &pix_src);
 		}
 	}
 
-	for (chan = 0; chan < COLOR_CHAN_NUM; chan++)
-		max_err = MAX(max_err, max_diff_pipeline.rgb[chan]);
+	ok = diffstat.two_norm.max <= arg->tolerance / 255.0f;
 
-	testlog("%s %s %s tol_req %d, tol_cal %f, max diff: r=%f, g=%f, b=%f %s\n",
-		__func__, ok == true? "SUCCESS":"FAILURE",
+	testlog("%s %s %s tolerance %f %s\n", __func__,
+		ok ? "SUCCESS" : "FAILURE",
 		arg->meta.name, arg->tolerance,
-		max_err * max_pixel_value,
-		max_diff_pipeline.r, max_diff_pipeline.g, max_diff_pipeline.b,
 		arg->type == PTYPE_MATRIX_SHAPER ? "matrix-shaper" : "cLUT");
 
-	return ok;
-}
+	rgb_diff_stat_print(&diffstat, __func__, 8);
 
-static bool
-check_process_pattern_ex(struct buffer *src, struct buffer *shot,
-		const struct setup_args * arg)
-{
-	struct image_header header_src;
-	struct image_header header_shot;
-	bool ok;
-
-	get_image_prop(src, &header_src);
-	get_image_prop(shot, &header_shot);
-
-	/* no point to compare different images */
-	assert(header_src.width == header_shot.width);
-	assert(header_src.height == header_shot.height);
-
-	ok = process_pipeline_comparison(&header_src, &header_shot, arg);
+	if (dump)
+		fclose(dump);
 
 	return ok;
 }
@@ -680,7 +601,6 @@ TEST(opaque_pixel_conversion)
 	struct buffer *buf;
 	struct buffer *shot;
 	struct wl_surface *surface;
-	struct image_header image;
 	bool match;
 
 	client = create_client_and_test_surface(0, 0, width, height);
@@ -688,8 +608,7 @@ TEST(opaque_pixel_conversion)
 	surface = client->surface->wl_surface;
 
 	buf = create_shm_buffer_a8r8g8b8(client, width, height);
-	get_image_prop(buf, &image);
-	gen_ramp_rgb(&image, bitwidth, width_bar);
+	gen_ramp_rgb(buf->image, bitwidth, width_bar);
 
 	wl_surface_attach(surface, buf->proxy, 0, 0);
 	wl_surface_damage(surface, 0, 0, width, height);
@@ -700,9 +619,229 @@ TEST(opaque_pixel_conversion)
 
 	match = verify_image(shot, "shaper_matrix", arg->ref_image_index,
 			     NULL, seq_no);
-	assert(check_process_pattern_ex(buf, shot, arg));
+	assert(process_pipeline_comparison(buf, shot, arg));
 	assert(match);
 	buffer_destroy(shot);
 	buffer_destroy(buf);
 	client_destroy(client);
+}
+
+static struct color_float
+convert_to_blending_space(const struct lcms_pipeline *pip,
+			  struct color_float cf)
+{
+	/* Blending space is the linearized output space,
+	 * or simply output space without the non-linear encoding
+	 */
+	cf = color_float_apply_curve(pip->pre_fn, cf);
+	return color_float_apply_matrix(&pip->mat, cf);
+}
+
+static void
+compare_blend(const struct lcms_pipeline *pip,
+	      struct color_float bg,
+	      struct color_float fg,
+	      const struct color_float *shot,
+	      struct rgb_diff_stat *diffstat)
+{
+	struct color_float ref;
+	unsigned i;
+
+	/* convert sources to straight alpha */
+	assert(bg.a == 1.0f);
+	fg = color_float_unpremult(fg);
+
+	bg = convert_to_blending_space(pip, bg);
+	fg = convert_to_blending_space(pip, fg);
+
+	/* blend */
+	for (i = 0; i < COLOR_CHAN_NUM; i++)
+		ref.rgb[i] = (1.0f - fg.a) * bg.rgb[i] + fg.a * fg.rgb[i];
+
+	/* non-linear encoding for output */
+	ref = color_float_apply_curve(pip->post_fn, ref);
+
+	rgb_diff_stat_update(diffstat, &ref, shot, &fg);
+}
+
+/* Alpha blending test pattern parameters */
+static const int ALPHA_STEPS = 256;
+static const int BLOCK_WIDTH = 1;
+
+static void *
+get_middle_row(struct buffer *buf)
+{
+	struct image_header ih = image_header_from(buf->image);
+
+	assert(ih.width >= BLOCK_WIDTH * ALPHA_STEPS);
+	assert(ih.height >= BLOCK_WIDTH);
+
+	return image_header_get_row_u32(&ih, (BLOCK_WIDTH - 1) / 2);
+}
+
+static bool
+check_blend_pattern(struct buffer *bg_buf,
+		    struct buffer *fg_buf,
+		    struct buffer *shot_buf,
+		    const struct setup_args *arg)
+{
+	FILE *dump = NULL;
+#if 0
+	/*
+	 * This file can be loaded in Octave for visualization. Find the script
+	 * in tests/visualization/weston_plot_rgb_diff_stat.m and call it with
+	 *
+	 * weston_plot_rgb_diff_stat('output_icc_alpha_blend-f01-dump.txt', 255, 8)
+	 */
+	dump = fopen_dump_file("dump");
+#endif
+
+	uint32_t *bg_row = get_middle_row(bg_buf);
+	uint32_t *fg_row = get_middle_row(fg_buf);
+	uint32_t *shot_row = get_middle_row(shot_buf);
+	struct rgb_diff_stat diffstat = { .dump = dump };
+	int x;
+
+	for (x = 0; x < BLOCK_WIDTH * ALPHA_STEPS; x++) {
+		struct color_float bg = a8r8g8b8_to_float(bg_row[x]);
+		struct color_float fg = a8r8g8b8_to_float(fg_row[x]);
+		struct color_float shot = a8r8g8b8_to_float(shot_row[x]);
+
+		compare_blend(arg->pipeline, bg, fg, &shot, &diffstat);
+	}
+
+	rgb_diff_stat_print(&diffstat, "Blending", 8);
+
+	if (dump)
+		fclose(dump);
+
+	/* Test success condition: */
+	return diffstat.two_norm.max < 1.5f / 255.0f;
+}
+
+static uint32_t
+premult_color(uint32_t a, uint32_t r, uint32_t g, uint32_t b)
+{
+	uint32_t c = 0;
+
+	c |= a << 24;
+	c |= (a * r / 255) << 16;
+	c |= (a * g / 255) << 8;
+	c |= a * b / 255;
+
+	return c;
+}
+
+static void
+fill_alpha_pattern(struct buffer *buf)
+{
+	struct image_header ih = image_header_from(buf->image);
+	int y;
+
+	assert(ih.pixman_format == PIXMAN_a8r8g8b8);
+	assert(ih.width == BLOCK_WIDTH * ALPHA_STEPS);
+
+	for (y = 0; y < ih.height; y++) {
+		uint32_t *row = image_header_get_row_u32(&ih, y);
+		uint32_t step;
+
+		for (step = 0; step < (uint32_t)ALPHA_STEPS; step++) {
+			uint32_t alpha = step * 255 / (ALPHA_STEPS - 1);
+			uint32_t color;
+			int i;
+
+			color = premult_color(alpha, 0, 255 - alpha, 255);
+			for (i = 0; i < BLOCK_WIDTH; i++)
+				*row++ = color;
+		}
+	}
+}
+
+/*
+ * Test that alpha blending is correct when an output ICC profile is installed.
+ *
+ * The background is a constant color. On top of that, there is an
+ * alpha-blended gradient with ramps in both alpha and color. Sub-surface
+ * ensures the correct positioning and stacking.
+ *
+ * The gradient consists of ALPHA_STEPS number of blocks. Block size is
+ * BLOCK_WIDTH x BLOCK_WIDTH and a block has a uniform color.
+ *
+ * In the blending result over x axis:
+ * - red goes from 1.0 to 0.0, monotonic
+ * - green is not monotonic
+ * - blue goes from 0.0 to 1.0, monotonic
+ *
+ * The test has sRGB encoded input pixels (non-linear). These are converted to
+ * linear light (optical) values in output color space, blended, and converted
+ * to non-linear (electrical) values according to the output ICC profile.
+ *
+ * Specifically, this test exercises the linearization of output ICC profiles,
+ * retrieve_eotf_and_output_inv_eotf().
+ */
+TEST(output_icc_alpha_blend)
+{
+	const int width = BLOCK_WIDTH * ALPHA_STEPS;
+	const int height = BLOCK_WIDTH;
+	const pixman_color_t background_color = {
+		.red   = 0xffff,
+		.green = 0x8080,
+		.blue  = 0x0000,
+		.alpha = 0xffff
+	};
+	int seq_no = get_test_fixture_index();
+	const struct setup_args *arg = &my_setup_args[seq_no];
+	struct client *client;
+	struct buffer *bg;
+	struct buffer *fg;
+	struct wl_subcompositor *subco;
+	struct wl_surface *surf;
+	struct wl_subsurface *sub;
+	struct buffer *shot;
+	bool match;
+
+	client = create_client();
+	subco = bind_to_singleton_global(client, &wl_subcompositor_interface, 1);
+
+	/* background window content */
+	bg = create_shm_buffer_a8r8g8b8(client, width, height);
+	fill_image_with_color(bg->image, &background_color);
+
+	/* background window, main surface */
+	client->surface = create_test_surface(client);
+	client->surface->width = width;
+	client->surface->height = height;
+	client->surface->buffer = bg; /* pass ownership */
+	surface_set_opaque_rect(client->surface,
+				&(struct rectangle){ 0, 0, width, height });
+
+	/* foreground blended content */
+	fg = create_shm_buffer_a8r8g8b8(client, width, height);
+	fill_alpha_pattern(fg);
+
+	/* foreground window, sub-surface */
+	surf = wl_compositor_create_surface(client->wl_compositor);
+	sub = wl_subcompositor_get_subsurface(subco, surf, client->surface->wl_surface);
+	/* sub-surface defaults to position 0, 0, top-most, synchronized */
+	wl_surface_attach(surf, fg->proxy, 0, 0);
+	wl_surface_damage(surf, 0, 0, width, height);
+	wl_surface_commit(surf);
+
+	/* attach, damage, commit background window */
+	move_client(client, 0, 0);
+
+	shot = capture_screenshot_of_output(client);
+	assert(shot);
+	match = verify_image(shot, "output_icc_alpha_blend", arg->ref_image_index,
+			     NULL, seq_no);
+	assert(check_blend_pattern(bg, fg, shot, arg));
+	assert(match);
+
+	buffer_destroy(shot);
+
+	wl_subsurface_destroy(sub);
+	wl_surface_destroy(surf);
+	buffer_destroy(fg);
+	wl_subcompositor_destroy(subco);
+	client_destroy(client); /* destroys bg */
 }

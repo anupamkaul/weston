@@ -113,6 +113,9 @@ struct weston_desktop_api {
 	 */
 	void (*set_xwayland_position)(struct weston_desktop_surface *surface,
 				      int32_t x, int32_t y, void *user_data);
+	void (*get_position)(struct weston_desktop_surface *surface,
+			     int32_t *x, int32_t *y,
+			     void *user_data);
 };
 
 void
@@ -194,6 +197,19 @@ struct weston_size
 weston_desktop_surface_get_max_size(struct weston_desktop_surface *surface);
 struct weston_size
 weston_desktop_surface_get_min_size(struct weston_desktop_surface *surface);
+
+bool
+weston_desktop_window_menu_supported(struct weston_desktop *desktop);
+bool
+weston_desktop_move_supported(struct weston_desktop *desktop);
+bool
+weston_desktop_resize_supported(struct weston_desktop *desktop);
+bool
+weston_desktop_fullscreen_supported(struct weston_desktop *desktop);
+bool
+weston_desktop_minimize_supported(struct weston_desktop *desktop);
+bool
+weston_desktop_maximize_supported(struct weston_desktop *desktop);
 
 #ifdef __cplusplus
 }

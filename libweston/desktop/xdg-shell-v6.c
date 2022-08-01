@@ -645,11 +645,11 @@ weston_desktop_xdg_toplevel_committed(struct weston_desktop_xdg_toplevel *toplev
 	struct weston_surface *wsurface =
 		weston_desktop_surface_get_surface(toplevel->base.desktop_surface);
 
-	if (!wsurface->buffer_ref.buffer && !toplevel->added) {
+	if (!weston_surface_has_content(wsurface) && !toplevel->added) {
 		weston_desktop_xdg_toplevel_ensure_added(toplevel);
 		return;
 	}
-	if (!wsurface->buffer_ref.buffer)
+	if (!weston_surface_has_content(wsurface))
 		return;
 
 	struct weston_geometry geometry =
@@ -841,6 +841,14 @@ weston_desktop_xdg_popup_committed(struct weston_desktop_xdg_popup *popup)
 	popup->committed = true;
 	weston_desktop_xdg_popup_update_position(popup->base.desktop_surface,
 						 popup);
+
+	if (!weston_surface_is_mapped(wsurface) &&
+	    weston_surface_has_content(wsurface)) {
+		weston_surface_map(wsurface);
+	} else if (weston_surface_is_mapped(wsurface) &&
+		   !weston_surface_has_content(wsurface)) {
+		weston_surface_unmap(wsurface);
+	}
 }
 
 static void
@@ -1209,7 +1217,7 @@ weston_desktop_xdg_surface_committed(struct weston_desktop_surface *dsurface,
 	struct weston_surface *wsurface =
 		weston_desktop_surface_get_surface (dsurface);
 
-	if (wsurface->buffer_ref.buffer && !surface->configured) {
+	if (weston_surface_has_content(wsurface) && !surface->configured) {
 		wl_resource_post_error(surface->resource,
 				       ZXDG_SURFACE_V6_ERROR_UNCONFIGURED_BUFFER,
 				       "xdg_surface has never been configured");
@@ -1397,7 +1405,7 @@ weston_desktop_xdg_shell_protocol_get_xdg_surface(struct wl_client *wl_client,
 	if (surface->resource == NULL)
 		return;
 
-	if (wsurface->buffer_ref.buffer != NULL) {
+	if (weston_surface_has_content(wsurface)) {
 		wl_resource_post_error(surface->resource,
 				       ZXDG_SURFACE_V6_ERROR_UNCONFIGURED_BUFFER,
 				       "xdg_surface must not have a buffer at creation");

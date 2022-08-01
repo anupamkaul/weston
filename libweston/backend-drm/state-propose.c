@@ -41,6 +41,7 @@
 #include "color.h"
 #include "linux-dmabuf.h"
 #include "presentation-time-server-protocol.h"
+#include "linux-dmabuf-unstable-v1-server-protocol.h"
 
 enum drm_output_propose_state_mode {
 	DRM_OUTPUT_PROPOSE_STATE_MIXED, /**< mix renderer & planes */
@@ -978,13 +979,7 @@ drm_assign_planes(struct weston_output *output_base)
 		pnode->try_view_on_plane_failure_reasons = FAILURE_REASONS_NONE;
 
 		/* Test whether this buffer can ever go into a plane:
-		 * non-shm, or small enough to be a cursor.
-		 *
-		 * Also, keep a reference when using the pixman renderer.
-		 * That makes it possible to do a seamless switch to the GL
-		 * renderer and since the pixman renderer keeps a reference
-		 * to the buffer anyway, there is no side effects.
-		 */
+		 * non-shm, or small enough to be a cursor.  */
 		ev->surface->keep_buffer = false;
 		if (weston_view_has_valid_buffer(ev)) {
 			struct weston_buffer *buffer =

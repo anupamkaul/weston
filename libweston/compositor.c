@@ -59,11 +59,13 @@
 #include <libweston/libweston.h>
 #include <libweston/weston-log.h>
 #include "linux-dmabuf.h"
+#include "linux-dmabuf-unstable-v1-server-protocol.h"
 #include "viewporter-server-protocol.h"
 #include "presentation-time-server-protocol.h"
 #include "xdg-output-unstable-v1-server-protocol.h"
 #include "linux-explicit-synchronization-unstable-v1-server-protocol.h"
 #include "linux-explicit-synchronization.h"
+#include "single-pixel-buffer-v1-server-protocol.h"
 #include "shared/fd-util.h"
 #include "shared/helpers.h"
 #include "shared/os-compatibility.h"
@@ -2121,7 +2123,7 @@ weston_surface_calculate_size_from_buffer(struct weston_surface *surface)
 {
 	struct weston_buffer_viewport *vp = &surface->buffer_viewport;
 
-	if (!surface->buffer_ref.buffer) {
+	if (!weston_surface_has_content(surface)) {
 		surface->width_from_buffer = 0;
 		surface->height_from_buffer = 0;
 		return;
@@ -2262,6 +2264,12 @@ weston_view_unmap(struct weston_view *view)
 }
 
 WL_EXPORT void
+weston_surface_map(struct weston_surface *surface)
+{
+	surface->is_mapped = true;
+}
+
+WL_EXPORT void
 weston_surface_unmap(struct weston_surface *surface)
 {
 	struct weston_view *view;
@@ -2276,8 +2284,6 @@ static void
 weston_surface_reset_pending_buffer(struct weston_surface *surface)
 {
 	weston_surface_state_set_buffer(&surface->pending, NULL);
-	surface->pending.sx = 0;
-	surface->pending.sy = 0;
 	surface->pending.newly_attached = 0;
 	surface->pending.buffer_viewport.changed = 0;
 }
@@ -2407,6 +2413,9 @@ destroy_surface(struct wl_resource *resource)
 	weston_surface_unref(surface);
 }
 
+static struct weston_solid_buffer_values *
+single_pixel_buffer_get(struct wl_resource *resource);
+
 static void
 weston_buffer_destroy_handler(struct wl_listener *listener, void *data)
 {
@@ -2431,6 +2440,7 @@ weston_buffer_from_resource(struct weston_compositor *ec,
 	struct wl_shm_buffer *shm;
 	struct linux_dmabuf_buffer *dmabuf;
 	struct wl_listener *listener;
+	struct weston_solid_buffer_values *solid;
 
 	listener = wl_resource_get_destroy_listener(resource,
 						    weston_buffer_destroy_handler);
@@ -2478,6 +2488,19 @@ weston_buffer_from_resource(struct weston_compositor *ec,
 			buffer->buffer_origin = ORIGIN_BOTTOM_LEFT;
 		else
 			buffer->buffer_origin = ORIGIN_TOP_LEFT;
+	} else if ((solid = single_pixel_buffer_get(buffer->resource))) {
+		buffer->type = WESTON_BUFFER_SOLID;
+		buffer->solid = *solid;
+		buffer->width = 1;
+		buffer->height = 1;
+		if (buffer->solid.a == 1.0) {
+			buffer->pixel_format =
+				pixel_format_get_info(DRM_FORMAT_XRGB8888);
+		} else {
+			buffer->pixel_format =
+				pixel_format_get_info(DRM_FORMAT_ARGB8888);
+		}
+		buffer->format_modifier = DRM_FORMAT_MOD_LINEAR;
 	} else {
 		/* Only taken for legacy EGL buffers */
 		if (!ec->renderer->fill_buffer_info ||
@@ -2695,6 +2718,97 @@ weston_buffer_destroy_solid(struct weston_buffer_reference *buffer_ref)
 }
 
 static void
+single_pixel_buffer_destroy(struct wl_resource *resource)
+{
+	struct weston_solid_buffer_values *solid =
+		wl_resource_get_user_data(resource);
+	free(solid);
+}
+
+static void
+single_pixel_buffer_handle_buffer_destroy(struct wl_client *client,
+					  struct wl_resource *resource)
+{
+	wl_resource_destroy(resource);
+}
+
+static const struct wl_buffer_interface single_pixel_buffer_implementation = {
+	single_pixel_buffer_handle_buffer_destroy,
+};
+
+static struct weston_solid_buffer_values *
+single_pixel_buffer_get(struct wl_resource *resource)
+{
+	if (!resource)
+		return NULL;
+
+	if (!wl_resource_instance_of(resource, &wl_buffer_interface,
+				     &single_pixel_buffer_implementation))
+		return NULL;
+
+	return wl_resource_get_user_data(resource);
+}
+
+static void
+single_pixel_buffer_manager_destroy(struct wl_client *client,
+				    struct wl_resource *resource)
+{
+	wl_resource_destroy(resource);
+}
+
+static void
+single_pixel_buffer_create(struct wl_client *client, struct wl_resource *resource,
+			   uint32_t id, uint32_t r, uint32_t g, uint32_t b, uint32_t a)
+{
+	struct weston_solid_buffer_values *solid = zalloc(sizeof(*solid));
+	struct wl_resource *buffer;
+
+	if (!solid) {
+		wl_client_post_no_memory(client);
+		return;
+	}
+
+	solid->r = r / (double) 0xffffffff;
+	solid->g = g / (double) 0xffffffff;
+	solid->b = b / (double) 0xffffffff;
+	solid->a = a / (double) 0xffffffff;
+
+	buffer = wl_resource_create(client, &wl_buffer_interface, 1, id);
+	if (!buffer) {
+		wl_client_post_no_memory(client);
+		free(solid);
+		return;
+	}
+	wl_resource_set_implementation(buffer,
+				       &single_pixel_buffer_implementation,
+				       solid, single_pixel_buffer_destroy);
+}
+
+static const struct wp_single_pixel_buffer_manager_v1_interface
+single_pixel_buffer_manager_implementation = {
+	single_pixel_buffer_manager_destroy,
+	single_pixel_buffer_create,
+};
+
+static void
+bind_single_pixel_buffer(struct wl_client *client, void *data, uint32_t version,
+			 uint32_t id)
+{
+	struct wl_resource *resource;
+
+	resource = wl_resource_create(client,
+				      &wp_single_pixel_buffer_manager_v1_interface, 1,
+				      id);
+	if (!resource) {
+		wl_client_post_no_memory(client);
+		return;
+	}
+	wl_resource_set_implementation(resource,
+				       &single_pixel_buffer_manager_implementation,
+				       NULL, NULL);
+}
+
+static void
 weston_surface_attach(struct weston_surface *surface,
 		      struct weston_buffer *buffer)
 {
@@ -2742,12 +2856,26 @@ weston_output_damage(struct weston_output *output)
 	weston_output_schedule_repaint(output);
 }
 
+/* FIXME: note that we don't flush any damage when the core wants us to
+ * do so as it will sometimes ask for a flush not necessarily at the
+ * right time.
+ *
+ * A (more) proper way is to handle correctly damage whenever there's
+ * compositor side damage. See the comment for weston_surface_damage().
+ */
+static bool
+buffer_can_be_accessed_BANDAID_XXX(struct weston_buffer_reference buffer_ref)
+{
+	return buffer_ref.type == BUFFER_MAY_BE_ACCESSED;
+}
+
 static void
 surface_flush_damage(struct weston_surface *surface)
 {
 	struct weston_buffer *buffer = surface->buffer_ref.buffer;
 
-	if (buffer && buffer->type == WESTON_BUFFER_SHM)
+	if (buffer->type == WESTON_BUFFER_SHM &&
+	    buffer_can_be_accessed_BANDAID_XXX(surface->buffer_ref))
 		surface->compositor->renderer->flush_damage(surface, buffer);
 
 	if (pixman_region32_not_empty(&surface->damage))
@@ -2985,6 +3113,26 @@ view_list_add(struct weston_compositor *compositor,
 	struct weston_subsurface *sub;
 
 	weston_view_update_transform(view);
+
+	/* It is possible for a view to appear in the layer list even though
+	 * the view or the surface is unmapped. This is erroneous but difficult
+	 * to fix. */
+	if (!weston_surface_is_mapped(view->surface) ||
+	    !weston_view_is_mapped(view) ||
+	    !weston_surface_has_content(view->surface)) {
+		if (!compositor->warned_about_unmapped_surface_or_view) {
+			weston_log("Detected an unmapped surface or view in "
+				   "the layer list, which should not occur.\n");
+			compositor->warned_about_unmapped_surface_or_view = true;
+		}
+
+		pnode = weston_view_find_paint_node(view, output);
+		if (pnode)
+			weston_paint_node_destroy(pnode);
+
+		return;
+	}
+
 	pnode = view_ensure_paint_node(view, output);
 
 	if (wl_list_empty(&view->surface->subsurface_list)) {
@@ -3104,6 +3252,10 @@ weston_output_repaint(struct weston_output *output)
 	} else {
 		wl_list_for_each(pnode, &output->paint_node_z_order_list,
 				 z_order_link) {
+			/* TODO: turn this into assert once z_order_list is pruned. */
+			if ((pnode->view->output_mask & (1u << output->id)) == 0)
+				continue;
+
 			weston_view_move_to_plane(pnode->view, &ec->primary_plane);
 			pnode->view->psf_flags = 0;
 		}
@@ -3609,6 +3761,16 @@ weston_compositor_schedule_repaint(struct weston_compositor *compositor)
 		weston_output_schedule_repaint(output);
 }
 
+/**
+ * Returns true if a surface has a buffer attached to it and thus valid
+ * content available.
+ */
+WL_EXPORT bool
+weston_surface_has_content(struct weston_surface *surface)
+{
+	return !!surface->buffer_ref.buffer;
+}
+
 static void
 surface_destroy(struct wl_client *client, struct wl_resource *resource)
 {
@@ -3630,6 +3792,14 @@ surface_attach(struct wl_client *client,
 			wl_client_post_no_memory(client);
 			return;
 		}
+	}
+
+	if (wl_resource_get_version(resource) >= WL_SURFACE_OFFSET_SINCE_VERSION &&
+	    (sx != 0 || sy != 0)) {
+		wl_resource_post_error(resource,
+				       WL_SURFACE_ERROR_INVALID_OFFSET,
+				       "Can't attach with an offset");
+		return;
 	}
 
 	/* Attach, attach, without commit in between does not send
@@ -4020,7 +4190,8 @@ weston_surface_commit_state(struct weston_surface *surface,
 	weston_matrix_invert(&surface->buffer_to_surface_matrix,
 			     &surface->surface_to_buffer_matrix);
 
-	if (state->newly_attached || state->buffer_viewport.changed) {
+	if (state->newly_attached || state->buffer_viewport.changed ||
+	    state->sx != 0 || state->sy != 0) {
 		weston_surface_update_size(surface);
 		if (surface->committed)
 			surface->committed(surface, state->sx, state->sy);
@@ -4216,6 +4387,18 @@ surface_set_buffer_scale(struct wl_client *client,
 	surface->pending.buffer_viewport.changed = 1;
 }
 
+static void
+surface_offset(struct wl_client *client,
+	       struct wl_resource *resource,
+	       int32_t sx,
+	       int32_t sy)
+{
+	struct weston_surface *surface = wl_resource_get_user_data(resource);
+
+	surface->pending.sx = sx;
+	surface->pending.sy = sy;
+}
+
 static const struct wl_surface_interface surface_interface = {
 	surface_destroy,
 	surface_attach,
@@ -4226,7 +4409,8 @@ static const struct wl_surface_interface surface_interface = {
 	surface_commit,
 	surface_set_buffer_transform,
 	surface_set_buffer_scale,
-	surface_damage_buffer
+	surface_damage_buffer,
+	surface_offset,
 };
 
 static void
@@ -4404,6 +4588,9 @@ weston_subsurface_commit_to_cache(struct weston_subsurface *sub)
 
 	weston_surface_reset_pending_buffer(surface);
 
+	surface->pending.sx = 0;
+	surface->pending.sy = 0;
+
 	pixman_region32_copy(&sub->cached.opaque, &surface->pending.opaque);
 
 	pixman_region32_copy(&sub->cached.input, &surface->pending.input);
@@ -4519,22 +4706,21 @@ subsurface_committed(struct weston_surface *surface, int32_t dx, int32_t dy)
 	 * mapped, parent is not in a visible layer, so this sub-surface
 	 * will not be drawn either.
 	 */
-
-	if (!weston_surface_is_mapped(surface)) {
-		surface->is_mapped = surface->buffer_ref.buffer != NULL;
-
-		/* Cannot call weston_view_update_transform(),
-		 * because that would call it also for the parent surface,
-		 * which might not be mapped yet. That would lead to
-		 * inconsistent state, where the window could never be
-		 * mapped.
-		 *
-		 * Instead just force the is_mapped flag on, to make
-		 * weston_surface_is_mapped() return true, so that when the
-		 * parent surface does get mapped, this one will get
-		 * included, too. See view_list_add().
-		 */
+	if (!weston_surface_is_mapped(surface) &&
+	    weston_surface_has_content(surface)) {
+		weston_surface_map(surface);
 	}
+
+	/* Cannot call weston_view_update_transform() here, because that would
+	 * call it also for the parent surface, which might not be mapped yet.
+	 * That would lead to inconsistent state, where the window could never
+	 * be mapped.
+	 *
+	 * Instead just force the child surface to appear mapped, to make
+	 * weston_surface_is_mapped() return true, so that when the parent
+	 * surface does get mapped, this one will get included, too. See
+	 * view_list_add().
+	 */
 }
 
 static struct weston_subsurface *
@@ -5644,6 +5830,33 @@ weston_output_iterate_heads(struct weston_output *output,
 	return container_of(node, struct weston_head, output_link);
 }
 
+static void
+weston_output_compute_protection(struct weston_output *output)
+{
+	struct weston_head *head;
+	enum weston_hdcp_protection op_protection;
+	bool op_protection_valid = false;
+	struct weston_compositor *wc = output->compositor;
+
+	wl_list_for_each(head, &output->head_list, output_link) {
+		if (!op_protection_valid) {
+			op_protection = head->current_protection;
+			op_protection_valid = true;
+		}
+		if (head->current_protection < op_protection)
+			op_protection = head->current_protection;
+	}
+
+	if (!op_protection_valid)
+		op_protection = WESTON_HDCP_DISABLE;
+
+	if (output->current_protection != op_protection) {
+		output->current_protection = op_protection;
+		weston_output_damage(output);
+		weston_schedule_surface_protection_update(wc);
+	}
+}
+
 /** Attach a head to an output
  *
  * \param output The output to attach to.
@@ -5682,6 +5895,8 @@ weston_output_attach_head(struct weston_output *output,
 
 	head->output = output;
 	wl_list_insert(output->head_list.prev, &head->output_link);
+
+	weston_output_compute_protection(output);
 
 	if (output->enabled) {
 		weston_head_add_global(head);
@@ -5995,33 +6210,6 @@ weston_head_set_supported_eotf_mask(struct weston_head *head,
 	weston_head_set_device_changed(head);
 }
 
-static void
-weston_output_compute_protection(struct weston_output *output)
-{
-	struct weston_head *head;
-	enum weston_hdcp_protection op_protection;
-	bool op_protection_valid = false;
-	struct weston_compositor *wc = output->compositor;
-
-	wl_list_for_each(head, &output->head_list, output_link) {
-		if (!op_protection_valid) {
-			op_protection = head->current_protection;
-			op_protection_valid = true;
-		}
-		if (head->current_protection < op_protection)
-			op_protection = head->current_protection;
-	}
-
-	if (!op_protection_valid)
-		op_protection = WESTON_HDCP_DISABLE;
-
-	if (output->current_protection != op_protection) {
-		output->current_protection = op_protection;
-		weston_output_damage(output);
-		weston_schedule_surface_protection_update(wc);
-	}
-}
-
 WL_EXPORT void
 weston_head_set_content_protection_status(struct weston_head *head,
 					  enum weston_hdcp_protection status)
@@ -6217,6 +6405,9 @@ weston_head_get_destroy_listener(struct weston_head *head,
 	return wl_signal_get(&head->destroy_signal, notify);
 }
 
+static void
+weston_output_set_position(struct weston_output *output, int x, int y);
+
 /* Move other outputs when one is resized so the space remains contiguous. */
 static void
 weston_compositor_reflow_outputs(struct weston_compositor *compositor,
@@ -6224,6 +6415,9 @@ weston_compositor_reflow_outputs(struct weston_compositor *compositor,
 {
 	struct weston_output *output;
 	bool start_resizing = false;
+
+	if (compositor->output_flow_dirty)
+		return;
 
 	if (!delta_width)
 		return;
@@ -6235,7 +6429,7 @@ weston_compositor_reflow_outputs(struct weston_compositor *compositor,
 		}
 
 		if (start_resizing) {
-			weston_output_move(output, output->x + delta_width, output->y);
+			weston_output_set_position(output, output->x + delta_width, output->y);
 			output->dirty = 1;
 		}
 	}
@@ -6341,8 +6535,8 @@ weston_output_init_geometry(struct weston_output *output, int x, int y)
 /**
  * \ingroup output
  */
-WL_EXPORT void
-weston_output_move(struct weston_output *output, int x, int y)
+static void
+weston_output_set_position(struct weston_output *output, int x, int y)
 {
 	struct weston_head *head;
 	struct wl_resource *resource;
@@ -6386,6 +6580,16 @@ weston_output_move(struct weston_output *output, int x, int y)
 			zxdg_output_v1_send_done(resource);
 		}
 	}
+}
+
+/**
+ * \ingroup output
+ */
+WL_EXPORT void
+weston_output_move(struct weston_output *output, int x, int y)
+{
+	output->compositor->output_flow_dirty = true;
+	weston_output_set_position(output, x, y);
 }
 
 /** Signal that a pending output is taken into use.
@@ -6614,6 +6818,11 @@ weston_compositor_remove_output(struct weston_output *output)
 
 	assert(output->destroying);
 	assert(output->enabled);
+
+	if (output->idle_repaint_source) {
+		wl_event_source_remove(output->idle_repaint_source);
+		output->idle_repaint_source = NULL;
+	}
 
 	wl_list_for_each_safe(pnode, pntmp,
 			      &output->paint_node_list, output_link) {
@@ -7263,9 +7472,6 @@ weston_output_release(struct weston_output *output)
 
 	weston_signal_emit_mutable(&output->user_destroy_signal, output);
 
-	if (output->idle_repaint_source)
-		wl_event_source_remove(output->idle_repaint_source);
-
 	if (output->enabled)
 		weston_compositor_remove_output(output);
 
@@ -7874,7 +8080,7 @@ debug_scene_view_print(FILE *fp, struct weston_view *view, int view_idx)
 	if (view->surface->resource) {
 		struct wl_resource *resource = view->surface->resource;
 		wl_client_get_credentials(wl_resource_get_client(resource),
-				  	  &pid, NULL, NULL);
+					  &pid, NULL, NULL);
 		surface_id = wl_resource_get_id(view->surface->resource);
 	}
 
@@ -7885,6 +8091,11 @@ debug_scene_view_print(FILE *fp, struct weston_view *view, int view_idx)
 	fprintf(fp, "\tView %d (role %s, PID %d, surface ID %u, %s, %p):\n",
 		view_idx, view->surface->role_name, pid, surface_id,
 		desc, view);
+
+	if (!weston_view_is_mapped(view))
+		fprintf(fp, "\t[view is not mapped!]\n");
+	if (!weston_surface_is_mapped(view->surface))
+		fprintf(fp, "\t[surface is not mapped!]\n");
 
 	box = pixman_region32_extents(&view->transform.boundingbox);
 	fprintf(fp, "\t\tposition: (%d, %d) -> (%d, %d)\n",
@@ -8139,7 +8350,7 @@ weston_compositor_create(struct wl_display *display,
 
 	ec->content_protection = NULL;
 
-	if (!wl_global_create(ec->wl_display, &wl_compositor_interface, 4,
+	if (!wl_global_create(ec->wl_display, &wl_compositor_interface, 5,
 			      ec, compositor_bind))
 		goto fail;
 
@@ -8157,6 +8368,11 @@ weston_compositor_create(struct wl_display *display,
 
 	if (!wl_global_create(ec->wl_display, &wp_presentation_interface, 1,
 			      ec, bind_presentation))
+		goto fail;
+
+	if (!wl_global_create(ec->wl_display,
+			      &wp_single_pixel_buffer_manager_v1_interface, 1,
+			      NULL, bind_single_pixel_buffer))
 		goto fail;
 
 	if (weston_input_init(ec) != 0)

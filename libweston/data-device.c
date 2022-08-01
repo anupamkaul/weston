@@ -420,8 +420,7 @@ drag_surface_configure(struct weston_drag *drag,
 	assert((pointer != NULL && touch == NULL) ||
 			(pointer == NULL && touch != NULL));
 
-	/* XXX: Why are we checking for a valid buffer here too ... ? */
-	if (!weston_surface_is_mapped(es) && es->buffer_ref.buffer) {
+	if (!weston_surface_is_mapped(es) && weston_surface_has_content(es)) {
 		if (pointer && pointer->sprite &&
 			weston_view_is_mapped(pointer->sprite))
 			list = &pointer->sprite->layer_link;
@@ -432,7 +431,7 @@ drag_surface_configure(struct weston_drag *drag,
 		weston_layer_entry_insert(list, &drag->icon->layer_link);
 		weston_view_update_transform(drag->icon);
 		pixman_region32_clear(&es->pending.input);
-		es->is_mapped = true;
+		weston_surface_map(es);
 		drag->icon->is_mapped = true;
 	}
 

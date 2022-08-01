@@ -31,6 +31,11 @@
 #include <libweston/libweston.h>
 #include "libweston-internal.h"
 
+struct noop_renderer {
+	struct weston_renderer base;
+	unsigned char seed; /* see comment in attach() */
+};
+
 static int
 noop_renderer_read_pixels(struct weston_output *output,
 			       pixman_format_code_t format, void *pixels,
@@ -55,10 +60,12 @@ noop_renderer_flush_damage(struct weston_surface *surface,
 static void
 noop_renderer_attach(struct weston_surface *es, struct weston_buffer *buffer)
 {
+	struct noop_renderer *renderer =
+		wl_container_of(es->compositor->renderer, renderer, base);
 	struct wl_shm_buffer *shm_buffer;
 	uint8_t *data;
-	uint32_t size, i, width, height, stride;
-	__attribute__((unused)) int unused = 0;
+	uint32_t size, i, height, stride;
+	unsigned char unused = 0;
 
 	if (!buffer)
 		return;
@@ -78,8 +85,7 @@ noop_renderer_attach(struct weston_surface *es, struct weston_buffer *buffer)
 	shm_buffer = buffer->shm_buffer;
 	data = wl_shm_buffer_get_data(shm_buffer);
 	stride = wl_shm_buffer_get_stride(shm_buffer);
-	width = wl_shm_buffer_get_width(shm_buffer);
-	height = wl_shm_buffer_get_height(shm_buffer);
+	height = buffer->height;
 	size = stride * height;
 
 	/* Access the buffer data to make sure the buffer's client gets killed
@@ -91,14 +97,18 @@ noop_renderer_attach(struct weston_surface *es, struct weston_buffer *buffer)
 		unused ^= data[i];
 	wl_shm_buffer_end_access(shm_buffer);
 
-	buffer->shm_buffer = shm_buffer;
-	buffer->width = width;
-	buffer->height = height;
+	/* Make sure that our unused is actually used, otherwise the compiler
+	 * is free to notice that our reads have no effect and elide them. */
+	renderer->seed = unused;
 }
 
 static void
 noop_renderer_destroy(struct weston_compositor *ec)
 {
+	struct noop_renderer *renderer =
+		wl_container_of(ec->renderer, renderer, base);
+
+	weston_log("no-op renderer SHM seed: %d\n", renderer->seed);
 	free(ec->renderer);
 	ec->renderer = NULL;
 }
@@ -106,18 +116,18 @@ noop_renderer_destroy(struct weston_compositor *ec)
 WL_EXPORT int
 noop_renderer_init(struct weston_compositor *ec)
 {
-	struct weston_renderer *renderer;
+	struct noop_renderer *renderer;
 
 	renderer = zalloc(sizeof *renderer);
 	if (renderer == NULL)
 		return -1;
 
-	renderer->read_pixels = noop_renderer_read_pixels;
-	renderer->repaint_output = noop_renderer_repaint_output;
-	renderer->flush_damage = noop_renderer_flush_damage;
-	renderer->attach = noop_renderer_attach;
-	renderer->destroy = noop_renderer_destroy;
-	ec->renderer = renderer;
+	renderer->base.read_pixels = noop_renderer_read_pixels;
+	renderer->base.repaint_output = noop_renderer_repaint_output;
+	renderer->base.flush_damage = noop_renderer_flush_damage;
+	renderer->base.attach = noop_renderer_attach;
+	renderer->base.destroy = noop_renderer_destroy;
+	ec->renderer = &renderer->base;
 
 	return 0;
 }

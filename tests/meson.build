@@ -2,7 +2,7 @@ plugin_test_shell_desktop = shared_library(
 	'weston-test-desktop-shell',
 	'weston-test-desktop-shell.c',
 	include_directories: common_inc,
-	dependencies: [ dep_lib_desktop, dep_libweston_public, dep_libexec_weston, dep_shell_utils ],
+	dependencies: [ dep_libweston_public, dep_libexec_weston, dep_shell_utils ],
 	name_prefix: '',
 	install: false
 )
@@ -14,6 +14,7 @@ lib_test_runner = static_library(
 	dependencies: [
 		dep_libweston_private_h_deps,
 		dep_wayland_client,
+                dep_libdl,
 	],
 	include_directories: common_inc,
 	install: false,
@@ -106,8 +107,6 @@ lib_zuc = static_library(
 	'../tools/zunitc/inc/zunitc/zunitc_impl.h',
 	'../tools/zunitc/src/zuc_base_logger.c',
 	'../tools/zunitc/src/zuc_base_logger.h',
-	'../tools/zunitc/src/zuc_collector.c',
-	'../tools/zunitc/src/zuc_collector.h',
 	'../tools/zunitc/src/zuc_context.h',
 	'../tools/zunitc/src/zuc_event.h',
 	'../tools/zunitc/src/zuc_event_listener.h',
@@ -147,6 +146,7 @@ tests = [
 		'dep_objs': dep_libexec_weston,
 	},
 	{	'name': 'color-manager', },
+        {       'name': 'custom-env', },
 	{	'name': 'devices', },
 	{
 		'name': 'drm-formats',
@@ -205,6 +205,14 @@ tests = [
 			xdg_shell_protocol_c,
 		],
 	},
+	{
+		'name': 'single-pixel-buffer',
+		'sources': [
+			'single-pixel-buffer-test.c',
+			single_pixel_buffer_v1_client_protocol_h,
+			single_pixel_buffer_v1_protocol_c,
+		]
+	},
 	{	'name': 'string', },
 	{	'name': 'subsurface', },
 	{	'name': 'subsurface-shot', },
@@ -241,7 +249,7 @@ tests = [
 		'sources': [
 		  'safe-signal-output-removal-test.c',
 		],
-		'dep_objs': [ dep_lib_desktop, dep_shell_utils ]
+		'dep_objs': [ dep_shell_utils ]
 	},
 ]
 

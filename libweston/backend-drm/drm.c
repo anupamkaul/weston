@@ -855,7 +855,7 @@ drm_output_find_special_plane(struct drm_device *device,
 	struct drm_plane *plane;
 
 	wl_list_for_each(plane, &device->plane_list, link) {
-		struct drm_output *tmp;
+		struct weston_output *base;
 		bool found_elsewhere = false;
 
 		if (plane->type != type)
@@ -866,7 +866,11 @@ drm_output_find_special_plane(struct drm_device *device,
 		/* On some platforms, primary/cursor planes can roam
 		 * between different CRTCs, so make sure we don't claim the
 		 * same plane for two outputs. */
-		wl_list_for_each(tmp, &b->compositor->output_list, base.link) {
+		wl_list_for_each(base, &b->compositor->output_list, link) {
+			struct drm_output *tmp = to_drm_output(base);
+			if (!tmp)
+				continue;
+
 			if (tmp->cursor_plane == plane ||
 			    tmp->scanout_plane == plane) {
 				found_elsewhere = true;
@@ -1389,6 +1393,17 @@ drm_output_set_seat(struct weston_output *base,
 				     seat ? seat : "");
 }
 
+static void
+drm_output_set_max_bpc(struct weston_output *base, unsigned max_bpc)
+{
+	struct drm_output *output = to_drm_output(base);
+
+	assert(output);
+	assert(!output->base.enabled);
+
+	output->max_bpc = max_bpc;
+}
+
 static int
 drm_output_init_gamma_size(struct drm_output *output)
 {
@@ -1796,14 +1811,10 @@ drm_output_attach_crtc(struct drm_output *output)
 static void
 drm_output_detach_crtc(struct drm_output *output)
 {
-	struct drm_device *device = output->device;
 	struct drm_crtc *crtc = output->crtc;
 
 	crtc->output = NULL;
 	output->crtc = NULL;
-
-	/* Force resetting unused CRTCs */
-	device->state_invalid = true;
 }
 
 static int
@@ -1876,6 +1887,13 @@ drm_output_deinit(struct weston_output *base)
 	struct drm_output *output = to_drm_output(base);
 	struct drm_backend *b = to_drm_backend(base->compositor);
 	struct drm_device *device = b->drm;
+	struct drm_pending_state *pending;
+
+	if (!b->shutting_down) {
+		pending = drm_pending_state_alloc(device);
+		drm_output_get_disable_state(pending, output);
+		drm_pending_state_apply_sync(pending);
+	}
 
 	if (b->use_pixman)
 		drm_output_fini_pixman(output);
@@ -2278,6 +2296,7 @@ drm_output_create(struct weston_compositor *compositor, const char *name)
 	output->device = device;
 	output->crtc = NULL;
 
+	output->max_bpc = 16;
 	output->gbm_format = DRM_FORMAT_INVALID;
 #ifdef BUILD_DRM_GBM
 	output->gbm_bo_flags = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;
@@ -2665,6 +2684,7 @@ drm_destroy(struct weston_compositor *ec)
 	weston_launcher_destroy(ec->launcher);
 
 	free(device->drm.filename);
+	free(device);
 	free(b);
 }
 
@@ -2674,9 +2694,7 @@ session_notify(struct wl_listener *listener, void *data)
 	struct weston_compositor *compositor = data;
 	struct drm_backend *b = to_drm_backend(compositor);
 	struct drm_device *device = b->drm;
-	struct drm_plane *plane;
-	struct drm_output *output;
-	struct drm_crtc *crtc;
+	struct weston_output *output;
 
 	if (compositor->session_active) {
 		weston_log("activating session\n");
@@ -2698,24 +2716,9 @@ session_notify(struct wl_listener *listener, void *data)
 		 * back, we schedule a repaint, which will process
 		 * pending frame callbacks. */
 
-		wl_list_for_each(output, &compositor->output_list, base.link) {
-			crtc = output->crtc;
-			output->base.repaint_needed = false;
-			if (output->cursor_plane)
-				drmModeSetCursor(device->drm.fd, crtc->crtc_id,
-						 0, 0, 0);
-		}
-
-		output = container_of(compositor->output_list.next,
-				      struct drm_output, base.link);
-		crtc = output->crtc;
-
-		wl_list_for_each(plane, &device->plane_list, link) {
-			if (plane->type != WDRM_PLANE_TYPE_OVERLAY)
-				continue;
-			drmModeSetPlane(device->drm.fd, plane->plane_id, crtc->crtc_id,
-					0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-		}
+		wl_list_for_each(output, &compositor->output_list, link)
+			if (to_drm_output(output))
+				output->repaint_needed = false;
 	}
 }
 
@@ -3005,11 +3008,15 @@ recorder_binding(struct weston_keyboard *keyboard, const struct timespec *time,
 		 uint32_t key, void *data)
 {
 	struct drm_backend *b = data;
+	struct weston_output *base_output;
 	struct drm_output *output;
 	int width, height;
 
-	output = container_of(b->compositor->output_list.next,
-			      struct drm_output, base.link);
+	wl_list_for_each(base_output, &b->compositor->output_list, link) {
+		output = to_drm_output(base_output);
+		if (output)
+			break;
+	}
 
 	if (!output->recorder) {
 		if (output->gbm_format != DRM_FORMAT_XRGB8888) {
@@ -3055,6 +3062,7 @@ static const struct weston_drm_output_api api = {
 	drm_output_set_mode,
 	drm_output_set_gbm_format,
 	drm_output_set_seat,
+	drm_output_set_max_bpc,
 };
 
 static struct drm_backend *
@@ -3231,8 +3239,6 @@ drm_backend_create(struct weston_compositor *compositor,
 					    planes_binding, b);
 	weston_compositor_add_debug_binding(compositor, KEY_Q,
 					    recorder_binding, b);
-	weston_compositor_add_debug_binding(compositor, KEY_W,
-					    renderer_switch_binding, b);
 
 	if (compositor->renderer->import_dmabuf) {
 		if (linux_dmabuf_setup(compositor) < 0)

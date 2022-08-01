@@ -37,6 +37,7 @@
 #include <libweston/backend-headless.h>
 #include "shared/helpers.h"
 #include "linux-explicit-synchronization.h"
+#include "pixel-formats.h"
 #include "pixman-renderer.h"
 #include "renderer-gl/gl-renderer.h"
 #include "shared/weston-drm-fourcc.h"
@@ -70,12 +71,11 @@ struct headless_output {
 
 	struct weston_mode mode;
 	struct wl_event_source *finish_frame_timer;
-	uint32_t *image_buf;
 	pixman_image_t *image;
 };
 
 static const uint32_t headless_formats[] = {
-	DRM_FORMAT_XRGB8888,
+	DRM_FORMAT_XRGB8888, /* default for pixman-renderer */
 	DRM_FORMAT_ARGB8888,
 };
 
@@ -165,7 +165,6 @@ headless_output_disable_pixman(struct headless_output *output)
 {
 	pixman_renderer_output_destroy(&output->base);
 	pixman_image_unref(output->image);
-	free(output->image_buf);
 }
 
 static int
@@ -233,20 +232,20 @@ headless_output_enable_gl(struct headless_output *output)
 static int
 headless_output_enable_pixman(struct headless_output *output)
 {
+	const struct pixel_format_info *pfmt;
 	const struct pixman_renderer_output_options options = {
 		.use_shadow = true,
 	};
 
-	output->image_buf = malloc(output->base.current_mode->width *
-				   output->base.current_mode->height * 4);
-	if (!output->image_buf)
-		return -1;
+	pfmt = pixel_format_get_info(headless_formats[0]);
 
-	output->image = pixman_image_create_bits(PIXMAN_x8r8g8b8,
-						 output->base.current_mode->width,
-						 output->base.current_mode->height,
-						 output->image_buf,
-						 output->base.current_mode->width * 4);
+	output->image =
+		pixman_image_create_bits_no_clear(pfmt->pixman_format,
+						  output->base.current_mode->width,
+						  output->base.current_mode->height,
+						  NULL, 0);
+	if (!output->image)
+		return -1;
 
 	if (pixman_renderer_output_create(&output->base, &options) < 0)
 		goto err_renderer;
@@ -257,7 +256,6 @@ headless_output_enable_pixman(struct headless_output *output)
 
 err_renderer:
 	pixman_image_unref(output->image);
-	free(output->image_buf);
 
 	return -1;
 }
