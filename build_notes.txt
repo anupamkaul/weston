@@ -1,0 +1,8 @@
+https://wayland.freedesktop.org/building.html
+
+Dependency libdrm found: NO found 2.4.91 but need: '>= 2.4.108'
+https://www.linuxfromscratch.org/blfs/view/svn/x/libdrm.html
+
+protocol/meson.build:4:0: ERROR: Neither a subproject directory nor a wayland-protocols.wrap file was found.
+
+
