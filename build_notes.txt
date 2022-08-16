@@ -1,8 +1,69 @@
 https://wayland.freedesktop.org/building.html
 
+Solutions to problems while building weston locally:
+
 Dependency libdrm found: NO found 2.4.91 but need: '>= 2.4.108'
 https://www.linuxfromscratch.org/blfs/view/svn/x/libdrm.html
+(installed .tar.gz for libdrm and built it using run.meson -> $WLD path for installation)
 
 protocol/meson.build:4:0: ERROR: Neither a subproject directory nor a wayland-protocols.wrap file was found.
+(dependency wayland-protocols.pc was in /home/anupam/Wayland/install/share/pkgconfig, added to PKG_CONFIG_PATH in Install.sh)
+
+logind support requires libsystemd >= 209. Or, you can use '-Dlauncher-logind=false
+sudo apt-get install libsystemd-dev
+sudo apt-get install libdbus-1-dev
+
+Run-time dependency libseat found: NO (tried pkgconfig and cmake)
+libweston/meson.build:197:1: ERROR: Dependency "libseat" not found, tried pkgconfig and cmake
+(https://archlinux.org/packages/community/x86_64/seatd/  ? or time to build libinput? (seats))..
+
+https://github.com/kennylevinsen/seatd ? 
+
+Disabled this dependency by reading README.txt and checking meson_options.txt. Whatever I don't
+need, I pass -D<var_name> to run.meson
+
+but: 
+libweston/backend-drm/meson.build:49:2: ERROR: Problem encountered: drm-backend with GL renderer requires gbm which was not found. Or, you can use '-Drenderer-gl=false'.
+(do I need mesa at this point? who provides the gbm interface for drm-backend? how did I compile libdrm: libdrm does not have any gbm stuff)
+
+for the moment go with -Drenderer-gl=false' although this should be re-enabled...
+actually: sudo apt-get install libgbm-dev
+
+Problem encountered: RDP-backend requires freerdp >= 2.3.0 which was not found. Or, you can use '-Dbackend-rdp=false'.
+- wow ! does weston work with RDP (remote desktop protocol)?
+
+Problem encountered: Pipewire plugin requires libpipewire which was not found. If you rather not build this, set '-Dpipewire=false'.
+
+Looks like gbm is an older version..
+Dependency gbm found: NO found 18.0.5 but need: '>= 21.1.1' (cached)
+Message: dmabuf-feedback requires gbm which was not found. If you rather not build this, drop "dmabuf-feedback" from simple-clients option.
+
+clients/meson.build:46:0: ERROR: Dependency 'gbm' is required but not found.
+so I went into clients and removed dmabuf-feedback section in its meson.build.
+
+This finally compiled weston and installed it in $WLD!
+This is latest weston..
+
+
+btw: https://launchpad.net/ubuntu/xenial/+package/weston = weston 1.9.0-3 for Xenial (Ubuntu 16.04 which is mine currently)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 

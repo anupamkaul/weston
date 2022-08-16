@@ -2,5 +2,16 @@
 
 echo $WLD
 
-meson build/ --prefix=$WLD
+# cancel out any options from meson_options.txt
+# for a faster compile
+
+# note: I don't like renderer-gl=false. This is because the system currently
+# cannot discover the gbm runtime dependency
+
+#meson build/ --prefix=$WLD -Dlauncher-libseat=FALSE -Dcolor-management-lcms=false -Drenderer-gl=false -Dbackend-drm-screencast-vaapi=false
+
+meson build/ --prefix=$WLD -Dlauncher-libseat=FALSE -Dcolor-management-lcms=false -Dbackend-drm-screencast-vaapi=false -Dbackend-rdp=false -Dpipewire=false
+
+#meson build/ --prefix=$WLD -Dlauncher-libseat=FALSE -Dcolor-management-lcms=false
+
 ninja -C build/ install
