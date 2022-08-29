@@ -47,6 +47,31 @@ This is latest weston..
 
 btw: https://launchpad.net/ubuntu/xenial/+package/weston = weston 1.9.0-3 for Xenial (Ubuntu 16.04 which is mine currently)
 
+---
+
+now weston launches but clients cannot connect:
+unable to find display etc.
+
+tried setting $XDG_RUNTIME_DIR to $WLD but doesn't work
+(I see wayland-1 / wayland-1.lock created. In fact if I multi-launch weston compositors I see wayland-2 etc 
+created in $XDG_RUNTIME_DIR. Original value of $XDG_RUNTIME_DIR is /run/usr/1000 with same effect). These sockets are deleted when weston is killed.
+
+https://forum.snapcraft.io/t/wayland-interface-xdg-runtime-dir-and-connecting-clients-to-server/11345
+
+(says wayland-0 should be the default. I always see wayland-1. Maybe there is a wayland-0 that is being used
+somewhere or the latest weston/wayland changed it to start from wayland-1 file? )
+
+Looks like I can set a $WAYLAND_DISPLAY to point to the correct socket/file..
+
+WAYLAND_DISPLAY=$XDG_RUNTIME_DIR/wayland-1 .. I did this, still doesn't work.
+Also weston.ini is in ./share/man/man5/weston.ini.5 and my weston launches without pointing to a config file.
+
+>> With minimal changes for just setting $XDG_RUNTIME_DIR to $WLD (install), I can certainly launch weston full screen, use the terminal from within this process, test weston-terminal, weston-keyboard, weston-flower, weston-simple-egl, and weston-simple-dma-buf. Dma-buf gets me a video rendering using my laptop's camera in a fixed window on weston !!
+
+--
+
+
+
 
 
 
