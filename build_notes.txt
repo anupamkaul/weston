@@ -70,7 +70,8 @@ Also weston.ini is in ./share/man/man5/weston.ini.5 and my weston launches witho
 
 --
 
-
+>> Notes on dma_buf:
+https://www.kernel.org/doc/html/v5.9/driver-api/dma-buf.html
 
 
 
