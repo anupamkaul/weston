@@ -255,6 +255,7 @@ demo_clients = [
 	},
 	{ 'basename': 'eventdemo' },
 	{ 'basename': 'flower' },
+	{ 'basename': 'multiflower' },
 	{
 		'basename': 'fullscreen',
 		'add_sources': [
